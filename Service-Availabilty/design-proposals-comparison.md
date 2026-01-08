@@ -1,56 +1,93 @@
-# Course Availability: Design Proposals Comparison
+# ListScheduleTimeSlots: Design Proposals Comparison
 
 ## Executive Summary
 
-This document presents three distinct design proposals for adding course availability support to the `ListEventTimeSlots` API. Each proposal represents a different trade-off between complexity, performance, and flexibility.
+This document presents design proposals for extending the `ListEventTimeSlots` API (renamed conceptually to `ListScheduleTimeSlots`) to support both classes and courses with unified schedule-level availability information.
 
-| Proposal | Name | Complexity | API Calls | Backend Changes | Risk |
-|----------|------|------------|-----------|-----------------|------|
-| **A** | Minimal Enhancement | Low | 1 | Small | Low |
-| **B** | Unified Response-Level CourseInfo | Medium | 1 | Medium | Medium |
-| **C** | Dedicated Course Availability API | High | 1 (new) | Large | High |
+| Proposal | Name | Complexity | Backend Changes | Risk | Supports Functionality 1 | Supports Functionality 2 |
+|----------|------|------------|-----------------|------|--------------------------|--------------------------|
+| **A** | Minimal Enhancement | Low | Small | Low | ❌ Client-side | ✅ |
+| **B** | Unified Schedule Availability | Medium | Medium | Medium | ✅ Server-side | ✅ |
+| **C** | Dedicated Course API | High | Large | High | ✅ Server-side | ✅ (separate endpoint) |
+
+### Two Core Functionalities
+
+| Functionality | Description | Use Case |
+|---------------|-------------|----------|
+| **1. Schedule Availability** | Is this schedule bookable as a whole? | Quick check before showing booking UI |
+| **2. TimeSlots Query** | List all time slots with full details | Calendar view, session selection |
 
 ---
 
 ## Current State
 
-### The Problem
+### Current System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         CURRENT CLIENT FLOW                                 │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              CURRENT CLIENT FLOWS                                   │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 
-CLASS AVAILABILITY (Works Well):
-┌──────────┐     1 API Call     ┌────────────────────┐
-│  Client  │ ─────────────────► │ ListEventTimeSlots │
-└──────────┘                    └────────────────────┘
-                                         │
-                                         ▼
-                                   TimeSlots[] with:
-                                   ✅ bookable
-                                   ✅ remainingCapacity
-                                   ✅ bookingPolicyViolations
+CLASS AVAILABILITY:
+┌──────────┐     ┌────────────────────┐     ┌────────────────────┐
+│  Client  │ ──► │ Services V2 Query  │ ──► │ ListEventTimeSlots │
+└──────────┘     │ (get serviceId,    │     │ (get TimeSlots)    │
+                 │  bookingPolicies)  │     └────────────────────┘
+                 └────────────────────┘              │
+                                                     ▼
+                                               TimeSlots[] with:
+                                               ✅ bookable (per slot)
+                                               ✅ remainingCapacity (per slot)
+                                               ✅ bookingPolicyViolations (per slot)
+                                               ❌ scheduleId (NOT populated!)
 
-COURSE AVAILABILITY (Problematic):
-┌──────────┐     3 API Calls    ┌────────────────────┐
-│  Client  │ ─────────────────► │ Services V2 Query  │ ─┐
-└──────────┘                    └────────────────────┘  │
-     │                                                   │
-     │                          ┌────────────────────┐  │
-     └─────────────────────────►│  Schedule Server   │ ─┤
-                                └────────────────────┘  │
-     │                                                   │
-     │                          ┌────────────────────┐  │
-     └─────────────────────────►│ Calendar V3 Events │ ─┘
-                                └────────────────────┘
-                                         │
-                                         ▼
-                               Client-side calculation of:
-                               - isFullyBooked
-                               - isTooEarlyToBook
-                               - isTooLateToBook
-                               - isBookable
+COURSE AVAILABILITY:
+┌──────────┐     ┌────────────────────┐     ┌────────────────────┐
+│  Client  │ ──► │ Services V2 Query  │ ──► │  Schedule Server   │
+└──────────┘     │ (get serviceId,    │     │ (get capacity,     │
+                 │  bookingPolicies)  │     │  participants)     │
+                 └────────────────────┘     └────────────────────┘
+                          │                          │
+                          └──────────┬───────────────┘
+                                     ▼
+                          Client-side calculation of:
+                          - isFullyBooked
+                          - isTooEarlyToBook
+                          - isTooLateToBook
+                          - isBookable
+```
+
+### Current Implementation Issues
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              ISSUES WITH CURRENT IMPLEMENTATION                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ISSUE 1: scheduleId Not Populated                                                  │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                                  │
+│  • Event object has scheduleId available                                            │
+│  • TimeSlot.scheduleId exists in proto (field 14)                                  │
+│  • But mapToTimeSlots() does NOT populate it                                        │
+│                                                                                     │
+│  ISSUE 2: Course vs Class Not Distinguished                                         │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                          │
+│  • Client cannot tell if TimeSlot is for CLASS or COURSE                           │
+│  • Event type available but not exposed                                             │
+│                                                                                     │
+│  ISSUE 3: Course Booking Requires Multiple API Calls                               │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                │
+│  • Services V2 Query (bookingPolicies)                                              │
+│  • Schedule Server (capacity, participants)                                         │
+│  • Calendar Events (sessions)                                                       │
+│  • Client calculates availability                                                   │
+│                                                                                     │
+│  ISSUE 4: Single Cursor for Multiple Services                                       │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                       │
+│  • Pagination is time-based, not service-based                                      │
+│  • Can't paginate per-service independently                                         │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Differences: Classes vs Courses
@@ -58,10 +95,359 @@ COURSE AVAILABILITY (Problematic):
 | Aspect | Class | Course |
 |--------|-------|--------|
 | Booking target | Individual event (session) | Entire schedule |
-| Capacity | Per-event | Per-schedule |
+| Capacity scope | Per-event | Per-schedule (propagated to all events) |
 | Participation | Event-level | Schedule-level |
 | Booking entity | `eventId` | `scheduleId` |
-| Sessions | Independent | All-or-nothing |
+| Sessions | Independent (can book any) | All-or-nothing |
+| BookingPolicies | Applied per session | Applied to first session |
+
+---
+
+## Open Questions & Answers
+
+### Q1: Are Booking Policies per Service?
+
+**Answer: YES**
+
+Booking policies are defined at the **service level**. All time slots of the same service share the same booking policy.
+
+```
+Service (serviceId)
+    └── BookingPolicy
+            ├── limitEarlyBooking (tooEarlyToBook)
+            ├── limitLateBooking (earliestBookingDate / tooLateToBook)  
+            └── bookAfterStartPolicy (course-specific)
+```
+
+**Implication:** If one slot of a service is `tooEarlyToBook`, all earlier slots of the same service are also `tooEarlyToBook`.
+
+---
+
+### Q2: What is `bookingPolicyViolations` in Request vs Response?
+
+**Answer: Request = FILTER, Response = CALCULATED VALUES**
+
+| Context | Purpose | Example |
+|---------|---------|---------|
+| **In Request** | Filter slots by violation status | `{tooEarlyToBook: true}` → return only slots that are too early |
+| **In Response** | Calculated violation status per slot | Shows why slot is not bookable |
+
+**Current Implementation Flow:**
+
+```
+Request                          Backend Processing                      Response
+────────────────────────────────────────────────────────────────────────────────────
+
+bookingPolicyViolations: {    →  1. Fetch policies via SPI          →  bookingPolicyViolations: {
+  tooEarlyToBook: true           2. Calculate violations per slot        tooEarlyToBook: true,
+}                                3. Filter slots matching request        tooLateToBook: false,
+                                 4. Return matching slots                 bookOnlineDisabled: false
+                                                                       }
+```
+
+---
+
+### Q3: Do We Currently Support Multiple serviceIDs?
+
+**Answer: YES**
+
+The current implementation fully supports multiple service IDs:
+
+```
+Request: {
+  serviceIds: ["service-1", "service-2", "service-3"]
+}
+
+Backend Processing:
+├── Query events for ALL services in single Calendar query
+├── Fetch policies per service (batched by 8)
+└── Return mixed TimeSlots ordered by start date
+
+Response: {
+  timeSlots: [
+    { serviceId: "service-1", localStartDate: "2026-01-10T10:00" },
+    { serviceId: "service-2", localStartDate: "2026-01-10T14:00" },
+    { serviceId: "service-1", localStartDate: "2026-01-11T10:00" },
+    ...
+  ]
+}
+```
+
+---
+
+### Q4: How Does Pagination Work with Multiple Services?
+
+**Answer: Single Cursor, Time-Based Pagination**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    PAGINATION MODEL                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  • Single cursor for entire response                            │
+│  • Cursor encodes: fromLocalDate = lastSlot.startDate + 1sec   │
+│  • ALL services paginate together by time                       │
+│  • Cannot paginate per-service independently                    │
+│                                                                 │
+│  Page 1 (limit=3):                                              │
+│  ┌─────────────────────────────────────────────┐               │
+│  │ service-1 │ 2026-01-10 10:00 │             │               │
+│  │ service-2 │ 2026-01-10 14:00 │             │               │
+│  │ service-1 │ 2026-01-11 10:00 │ ← cursor    │               │
+│  └─────────────────────────────────────────────┘               │
+│                                                                 │
+│  Page 2 (cursor = "2026-01-11T10:00:01"):                      │
+│  ┌─────────────────────────────────────────────┐               │
+│  │ service-2 │ 2026-01-11 14:00 │             │               │
+│  │ service-1 │ 2026-01-12 10:00 │             │               │
+│  │ ...                                        │               │
+│  └─────────────────────────────────────────────┘               │
+│                                                                 │
+│  ⚠️ LIMITATION: If service-1 has 1000 slots and service-2     │
+│     has 10 slots, you can't get all of service-2 without       │
+│     paging through service-1 slots.                             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Q5: Do We Enforce Policies Today for Classes?
+
+**Answer: YES - Policies are Applied per TimeSlot**
+
+```
+Current Policy Enforcement Flow:
+────────────────────────────────
+
+1. Fetch booking policies from SPI
+   └── bookingPolicyProvider.listBookingPolicies(serviceIds)
+
+2. For each event, calculate violations
+   └── TimeSlotPolicyViolationsCalculator(policy)
+         .calculateBookingPolicyViolations(zonedStart)
+
+3. Apply to TimeSlot
+   ├── tooEarlyToBook = (now + earliestBookingInMinutes) > slotStart
+   ├── tooLateToBook = (now + latestBookingInMinutes) > slotStart  
+   └── bookOnlineDisabled = policy.onlineBookingDisabled
+
+4. Calculate bookable
+   └── bookable = hasCapacity && !tooEarly && !tooLate && !disabled
+
+5. Optional: Filter by request.bookingPolicyViolations
+   └── filterByBookingPolicyViolationsIfEnabled(slot, request.bookingPolicyViolations)
+```
+
+---
+
+## Booking Policies Reference
+
+### Policy Types and Their Effects
+
+| Policy | Field in Service | Effect on TimeSlot | Applies To |
+|--------|------------------|-------------------|------------|
+| **Limit Early Booking** | `bookingPolicy.limitEarlyBookingPolicy.earliestBookingInMinutes` | `tooEarlyToBook = true` | All slots too far in future |
+| **Limit Late Booking** | `bookingPolicy.limitLateBookingPolicy.latestBookingInMinutes` | `tooLateToBook = true` + `earliestBookingDate` | All slots too close to start |
+| **Book After Start** | `bookingPolicy.bookAfterStartPolicy.enabled` | Allows booking started courses | Courses only |
+| **Book Online Disabled** | `onlineBooking.enabled = false` | `bookOnlineDisabled = true` | All slots |
+
+---
+
+## Optimization Matrix: Request Fields × Policy Flags
+
+### How Optimizations Can Be Applied
+
+| Request Field | Current Use | Optimization Potential for Func. 1 | Optimization Potential for Func. 2 |
+|---------------|-------------|-------------------------------------|-------------------------------------|
+| `fromLocalDate` | Filter events ≥ date | For courses: if first session < fromDate and !bookAfterStart → unavailable | Query only from this date |
+| `toLocalDate` | Filter events ≤ date | For courses: if last session < now → unavailable | Query only until this date |
+| `serviceIds` | Filter by service | Determines which schedules to check | Filters events by service |
+| `includeNonBookable` | Include/exclude non-bookable slots | If false + no bookable slot exists → unavailable early | Filter out non-bookable |
+| `minBookableCapacity` | Filter by capacity ≥ N | If no event meets capacity → unavailable | Filter in Calendar query |
+
+### Policy-Based Optimizations
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│                          OPTIMIZATION DECISION TREE                                   │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  FOR COURSES (Schedule-Level Booking):                                               │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                                │
+│                                                                                      │
+│  STEP 1: Check if course ended                                                       │
+│  ┌─────────────────────────────────────────────────────────────────┐                │
+│  │ IF lastSessionEnd < now                                         │                │
+│  │   → UNAVAILABLE (courseEnded = true)                            │                │
+│  │   → No need to fetch events                                     │                │
+│  └─────────────────────────────────────────────────────────────────┘                │
+│                                                                                      │
+│  STEP 2: Check bookAfterStart policy                                                 │
+│  ┌─────────────────────────────────────────────────────────────────┐                │
+│  │ IF firstSessionStart < now AND !bookAfterStartPolicy.enabled    │                │
+│  │   → UNAVAILABLE (tooLateToBook = true)                          │                │
+│  │   → No need to fetch events                                     │                │
+│  └─────────────────────────────────────────────────────────────────┘                │
+│                                                                                      │
+│  STEP 3: Check capacity                                                              │
+│  ┌─────────────────────────────────────────────────────────────────┐                │
+│  │ IF schedule.capacity - schedule.totalParticipants <= 0          │                │
+│  │   → UNAVAILABLE (fullyBooked = true)                            │                │
+│  │   → Can still return events for display                         │                │
+│  └─────────────────────────────────────────────────────────────────┘                │
+│                                                                                      │
+│  STEP 4: Check tooEarlyToBook                                                        │
+│  ┌─────────────────────────────────────────────────────────────────┐                │
+│  │ IF now + earliestBookingInMinutes < firstSessionStart           │                │
+│  │   → UNAVAILABLE (tooEarlyToBook = true)                         │                │
+│  │   → Can still return events for display                         │                │
+│  └─────────────────────────────────────────────────────────────────┘                │
+│                                                                                      │
+│  FOR CLASSES (Event-Level Booking):                                                  │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                                  │
+│                                                                                      │
+│  STEP 1: Since policies are per-service, once we find one tooEarlyToBook,          │
+│          all EARLIER slots are also tooEarlyToBook                                  │
+│                                                                                      │
+│  STEP 2: Similarly, once we find one tooLateToBook,                                 │
+│          all LATER slots are also tooLateToBook (not yet implemented)               │
+│                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Optimization Combinations Table
+
+| Scenario | tooEarlyToBook | tooLateToBook | bookAfterStart | Func. 1 Optimization | Func. 2 Optimization |
+|----------|----------------|---------------|----------------|----------------------|----------------------|
+| Course ended | N/A | N/A | N/A | Skip all queries, return `courseEnded: true` | Still fetch events for display |
+| Course started, no bookAfterStart | false | true | false | Return unavailable immediately | Fetch events, mark as non-bookable |
+| Course started, bookAfterStart enabled | false | false | true | Check capacity + remaining sessions | Fetch events, course still bookable |
+| Course not started, too early | true | false | N/A | Return `tooEarlyToBook` + `earliestBookingDate` | Fetch events, mark as non-bookable |
+| Course not started, within window | false | false | N/A | Check capacity only | Fetch events normally |
+| Fully booked course | N/A | N/A | N/A | Return `fullyBooked: true` | Fetch events, mark as non-bookable |
+
+---
+
+## Current Implementation Flow
+
+### Current Sequence Diagram
+
+```
+┌───────────────────────────────────────────────────────────────────────────────────────┐
+│                        CURRENT ListEventTimeSlots FLOW                                 │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+
+    Client                EventTimeSlots           SPI                Calendar V3
+       │                       │                    │                     │
+       │  ListEventTimeSlots   │                    │                     │
+       │ ─────────────────────►│                    │                     │
+       │                       │                    │                     │
+       │                       │ getProviderConfig  │                     │
+       │                       │───────────────────►│                     │
+       │                       │◄───────────────────│                     │
+       │                       │                    │                     │
+       │                       │                    │    queryEvents      │
+       │                       │────────────────────────────────────────►│
+       │                       │◄────────────────────────────────────────│
+       │                       │                    │                     │
+       │                       │ listBookingPolicies│                     │
+       │                       │───────────────────►│                     │
+       │                       │◄───────────────────│                     │
+       │                       │                    │                     │
+       │                       │ [For each event]   │                     │
+       │                       │ Calculate:         │                     │
+       │                       │ - policyViolations │                     │
+       │                       │ - bookable         │                     │
+       │                       │ - capacity         │                     │
+       │                       │                    │                     │
+       │  TimeSlots[]          │                    │                     │
+       │◄──────────────────────│                    │                     │
+       │                       │                    │                     │
+       │  ⚠️ scheduleId NOT populated!             │                     │
+       │  ⚠️ No schedule-level availability!       │                     │
+```
+
+### Current Decision Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           CURRENT DECISION FLOW                                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  START                                                                              │
+│    │                                                                                │
+│    ▼                                                                                │
+│  ┌─────────────────────────────────────┐                                           │
+│  │ Validate request                    │                                           │
+│  │ - fromLocalDate required            │                                           │
+│  │ - maxSlotsPerDay needs toLocalDate  │                                           │
+│  └─────────────────┬───────────────────┘                                           │
+│                    │                                                                │
+│                    ▼                                                                │
+│  ┌─────────────────────────────────────┐                                           │
+│  │ Get SPI configuration               │                                           │
+│  │ - eventFilter (type: CLASS)         │                                           │
+│  │ - eventServiceIdField               │                                           │
+│  └─────────────────┬───────────────────┘                                           │
+│                    │                                                                │
+│                    ▼                                                                │
+│  ┌─────────────────────────────────────┐                                           │
+│  │ Build query filter                  │◄───────────────────────────┐              │
+│  │ - providerBaseFilter                │                            │              │
+│  │ + minBookableCapacity               │                            │              │
+│  │ + eventFilter (from request)        │                            │              │
+│  │ + serviceIds filter                 │                            │              │
+│  └─────────────────┬───────────────────┘                            │              │
+│                    │                                                 │              │
+│                    ▼                                                 │              │
+│  ┌─────────────────────────────────────┐                            │              │
+│  │ Query Calendar V3 Events            │                            │              │
+│  │ (with pagination)                   │                            │              │
+│  └─────────────────┬───────────────────┘                            │              │
+│                    │                                                 │              │
+│                    ▼                                                 │              │
+│  ┌─────────────────────────────────────┐                            │              │
+│  │ Filter hidden services (optional)   │                            │              │
+│  └─────────────────┬───────────────────┘                            │              │
+│                    │                                                 │              │
+│                    ▼                                                 │              │
+│  ┌─────────────────────────────────────┐                            │              │
+│  │ Fetch booking policies              │                            │              │
+│  │ (batched by 8 services)             │                            │              │
+│  └─────────────────┬───────────────────┘                            │              │
+│                    │                                                 │              │
+│                    ▼                                                 │              │
+│  ┌─────────────────────────────────────┐                            │              │
+│  │ For each event:                     │                            │              │
+│  │ - Calculate policy violations       │                            │              │
+│  │ - Calculate bookable                │                            │              │
+│  │ - Map to TimeSlot                   │                            │              │
+│  └─────────────────┬───────────────────┘                            │              │
+│                    │                                                 │              │
+│                    ▼                                                 │              │
+│  ┌─────────────────────────────────────┐                            │              │
+│  │ Apply filters:                      │                            │              │
+│  │ - includeNonBookable                │                            │              │
+│  │ - bookingPolicyViolations filter    │                            │              │
+│  │ - maxSlotsPerDay                    │                            │              │
+│  └─────────────────┬───────────────────┘                            │              │
+│                    │                                                 │              │
+│                    ▼                                                 │              │
+│  ┌─────────────────────────────────────┐      ┌─────────────────┐   │              │
+│  │ Enough slots?                       │─NO──►│ More to fetch?  │───┘              │
+│  └─────────────────┬───────────────────┘      └─────────────────┘                  │
+│                    │ YES                                                            │
+│                    ▼                                                                │
+│  ┌─────────────────────────────────────┐                                           │
+│  │ Build response with cursor          │                                           │
+│  └─────────────────┬───────────────────┘                                           │
+│                    │                                                                │
+│                    ▼                                                                │
+│                  END                                                                │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -72,116 +458,149 @@ COURSE AVAILABILITY (Problematic):
 **Philosophy:** Make the smallest possible changes to enable course support without restructuring the API.
 
 **Key Changes:**
-1. Populate the existing `scheduleId` field in TimeSlot (currently empty)
-2. Include COURSE events in the query (update filter)
-3. Add a simple `isCourse` flag to TimeSlot
+1. Populate the existing `scheduleId` field in TimeSlot (currently empty - one line fix!)
+2. Include COURSE events in the query (update SPI filter)
 
-## Architecture
+**Does NOT include:**
+- `isCourse` flag (client can determine from serviceId)
+- Server-side schedule availability calculation
+- Any new fields or messages
 
-```mermaid
-flowchart TB
-    subgraph Current["Current Response"]
-        TS1["TimeSlot {<br/>  serviceId<br/>  scheduleId: ❌ null<br/>  bookable<br/>  remainingCapacity<br/>}"]
-    end
-    
-    subgraph ProposalA["Proposal A Response"]
-        TS2["TimeSlot {<br/>  serviceId<br/>  scheduleId: ✅ populated<br/>  bookable<br/>  remainingCapacity<br/>  isCourse: ✅ new<br/>}"]
-    end
-    
-    Current --> ProposalA
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         PROPOSAL A: MINIMAL ENHANCEMENT                              │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌───────────────┐                                                                  │
+│  │    Client     │                                                                  │
+│  │               │                                                                  │
+│  │ ┌───────────┐ │     ┌─────────────────────────────────────────┐                 │
+│  │ │ Services  │─┼────►│           Services V2 API                │                 │
+│  │ │ V2 Query  │ │     │  (get serviceId, bookingPolicies, type) │                 │
+│  │ └───────────┘ │     └─────────────────────────────────────────┘                 │
+│  │       │       │                                                                  │
+│  │       ▼       │                                                                  │
+│  │ ┌───────────┐ │     ┌─────────────────────────────────────────┐                 │
+│  │ │ List      │─┼────►│         ListEventTimeSlots               │                 │
+│  │ │ TimeSlots │ │     │  (now returns scheduleId!)               │                 │
+│  │ └───────────┘ │     └──────────────────┬──────────────────────┘                 │
+│  │       │       │                        │                                         │
+│  │       ▼       │                        ▼                                         │
+│  │ ┌───────────┐ │     ┌─────────────────────────────────────────┐                 │
+│  │ │ Client    │ │     │           Calendar V3 Events             │                 │
+│  │ │ Calculate │ │     │  (now queries CLASS + COURSE)            │                 │
+│  │ │ Avail.    │ │     └─────────────────────────────────────────┘                 │
+│  │ └───────────┘ │                                                                  │
+│  │               │                                                                  │
+│  └───────────────┘                                                                  │
+│                                                                                     │
+│  Changes: ● scheduleId now populated in TimeSlot                                    │
+│           ● Filter includes COURSE events                                           │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Proto Changes
+## Sequence Diagram
 
-```protobuf
-message TimeSlot {
-  // Existing fields (unchanged)
-  google.protobuf.StringValue service_id = 1;
-  google.protobuf.StringValue local_start_date = 2;
-  google.protobuf.StringValue local_end_date = 3;
-  google.protobuf.BoolValue bookable = 4;
-  google.protobuf.Int32Value total_capacity = 7;
-  google.protobuf.Int32Value remaining_capacity = 8;
-  // ... other existing fields ...
-  
-  // EXISTING but now populated
-  google.protobuf.StringValue schedule_id = 14;
-  
-  // NEW: Simple flag to identify course slots
-  google.protobuf.BoolValue is_course = 15;
-}
+```
+    Client             Services V2       EventTimeSlots        Calendar V3
+       │                    │                  │                    │
+       │ Query Service      │                  │                    │
+       │───────────────────►│                  │                    │
+       │◄───────────────────│                  │                    │
+       │ {type, policies}   │                  │                    │
+       │                    │                  │                    │
+       │ ListEventTimeSlots(serviceId)         │                    │
+       │──────────────────────────────────────►│                    │
+       │                    │                  │                    │
+       │                    │                  │ Query CLASS+COURSE │
+       │                    │                  │───────────────────►│
+       │                    │                  │◄───────────────────│
+       │                    │                  │                    │
+       │ TimeSlots[] with scheduleId!          │                    │
+       │◄──────────────────────────────────────│                    │
+       │                    │                  │                    │
+       │ Calculate schedule │                  │                    │
+       │ availability       │                  │                    │
+       │ (CLIENT-SIDE)      │                  │                    │
+       │                    │                  │                    │
 ```
 
-## Implementation Changes
+## Decision Flow
 
-### EventTimeSlots.scala
-
-```scala
-// Only 2 changes needed:
-
-// 1. Update mapToTimeSlots to populate scheduleId
-private def mapToTimeSlots(event: Event, ...): TimeSlot = {
-  // ... existing logic ...
-  
-  TimeSlot(
-    serviceId = Some(eventServiceId),
-    // ... other fields ...
-    scheduleId = event.scheduleId,  // ← ADD THIS (one line!)
-    isCourse = Some(event.`type`.contains("COURSE")),  // ← ADD THIS
-  )
-}
-
-// 2. Update SPI config to include COURSE events
-// In EventTimeSlotsConfigurationProvider implementation:
-// Change filter from {"type": "CLASS"} to {"type": {"$in": ["CLASS", "COURSE"]}}
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                      PROPOSAL A: DECISION FLOW (CLIENT-SIDE)                         │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [Same as current backend flow for ListEventTimeSlots]                              │
+│                                                                                     │
+│  Plus one line added in mapToTimeSlots():                                           │
+│    TimeSlot(..., scheduleId = event.scheduleId)                                     │
+│                                                                                     │
+│  CLIENT must still calculate schedule availability:                                  │
+│                                                                                     │
+│                  ┌───────────────────┐                                              │
+│                  │ Get TimeSlots     │                                              │
+│                  └─────────┬─────────┘                                              │
+│                            │                                                        │
+│                            ▼                                                        │
+│         ┌──────────────────────────────────────┐                                    │
+│         │ Is service type COURSE?              │                                    │
+│         │ (from Services V2 query)             │                                    │
+│         └───────────────┬──────────────────────┘                                    │
+│                         │                                                           │
+│              ┌──────────┴──────────┐                                               │
+│              ▼                     ▼                                               │
+│         ┌────────┐            ┌────────┐                                           │
+│         │ CLASS  │            │ COURSE │                                           │
+│         └────┬───┘            └────┬───┘                                           │
+│              │                     │                                               │
+│              ▼                     ▼                                               │
+│    ┌─────────────────┐    ┌─────────────────┐                                      │
+│    │ Each slot is    │    │ Client calcs:   │                                      │
+│    │ independent     │    │ - fullyBooked   │                                      │
+│    │ (use as-is)     │    │ - tooEarly      │                                      │
+│    └─────────────────┘    │ - tooLate       │                                      │
+│                           │ - ended         │                                      │
+│                           └─────────────────┘                                      │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Response Example
+## Class Diagram (Changes)
 
-```json
-{
-  "time_slots": [
-    {
-      "service_id": "course-123",
-      "schedule_id": "8edc0bb2-2688-4b11-824d-eed023c8cc07",
-      "local_start_date": "2026-03-05T10:00:00",
-      "local_end_date": "2026-03-05T12:00:00",
-      "bookable": true,
-      "total_capacity": 20,
-      "remaining_capacity": 12,
-      "is_course": true,
-      "event_info": {
-        "event_id": "session-1-event"
-      }
-    },
-    {
-      "service_id": "course-123",
-      "schedule_id": "8edc0bb2-2688-4b11-824d-eed023c8cc07",
-      "local_start_date": "2026-03-12T10:00:00",
-      "is_course": true
-    }
-  ]
-}
 ```
-
-## Client Migration
-
-```typescript
-// Client code change:
-const courseSlots = response.timeSlots.filter(slot => slot.isCourse);
-
-if (courseSlots.length > 0) {
-  const firstSlot = courseSlots[0];
-  
-  // Use scheduleId for booking (now available!)
-  const scheduleId = firstSlot.scheduleId;
-  
-  // Capacity is already correct (same for all course slots)
-  const remainingCapacity = firstSlot.remainingCapacity;
-  
-  // Client still calculates course-level bookability
-  // but gets all data from ONE API call
-}
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        PROPOSAL A: CLASS DIAGRAM CHANGES                             │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │           TimeSlot                  │                                           │
+│  ├─────────────────────────────────────┤                                           │
+│  │ - serviceId: String                 │                                           │
+│  │ - localStartDate: String            │                                           │
+│  │ - localEndDate: String              │                                           │
+│  │ - bookable: Boolean                 │                                           │
+│  │ - totalCapacity: Int                │                                           │
+│  │ - remainingCapacity: Int            │                                           │
+│  │ - bookableCapacity: Int             │                                           │
+│  │ - eventInfo: EventInfo              │                                           │
+│  │ - bookingPolicyViolations: ...      │                                           │
+│  │ - nonBookableReasons: ...           │                                           │
+│  │ - scheduleId: String ◄──────────── NOW POPULATED (was null)                     │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │    EventTimeSlotsProviderConfig     │                                           │
+│  ├─────────────────────────────────────┤                                           │
+│  │ - eventFilter: Struct ◄──────────── CHANGED: {"type": {"$in": ["CLASS","COURSE"]}}
+│  │ - eventServiceIdField: String       │                                           │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Pros & Cons
@@ -190,249 +609,322 @@ if (courseSlots.length > 0) {
 
 | Benefit | Description |
 |---------|-------------|
-| **Minimal code changes** | ~20 lines of code |
+| **Minimal code changes** | ~5 lines of code change |
 | **Low risk** | No restructuring, easy rollback |
-| **Fast implementation** | Days, not weeks |
-| **Backwards compatible** | New fields are optional |
-| **Reduces API calls** | 3 → 1 (scheduleId now included) |
+| **Fast implementation** | Hours, not days |
+| **Backwards compatible** | No breaking changes |
+| **Enables course support** | scheduleId now available for booking |
 
 ### ❌ Cons
 
 | Drawback | Description |
 |----------|-------------|
-| **Client still calculates** | Bookability logic remains on frontend |
+| **Client calculates** | Availability logic remains on frontend |
+| **No Functionality 1** | Cannot get quick schedule availability |
+| **No optimizations** | Still fetches all events even if unavailable |
 | **Duplicate data** | Course info repeated per session |
-| **No courseBookable** | Client must aggregate from slots |
-| **Missing course metadata** | No firstSessionStart, lastSessionEnd, etc. |
-| **Inconsistent semantics** | TimeSlot.bookable = session bookable, not course bookable |
 
 ---
 
-# Proposal B: Unified Response-Level CourseInfo
+# Proposal B: Unified Schedule Availability
 
 ## Overview
 
-**Philosophy:** Add course-level information at the response level to avoid duplication and enable server-side bookability calculation.
+**Philosophy:** Add schedule-level availability at the response level to support both classes and courses with server-side calculations.
 
 **Key Changes:**
 1. Populate `scheduleId` in TimeSlot
-2. Add `courseInfoByServiceId` map to response
-3. Server calculates `courseBookable`
-4. Query Schedule API for accurate course-level data
+2. Add `scheduleInfoByServiceId` map to response (works for both classes and courses)
+3. Add optional `provideScheduleAvailabilityOnly` flag for quick availability check
+4. Server calculates schedule-level availability with optimizations
 
-## Architecture
+## Architecture Diagram
 
-```mermaid
-flowchart TB
-    subgraph Client["Client Request"]
-        REQ["ListEventTimeSlotsRequest<br/>{serviceIds: ['course-1']}"]
-    end
-    
-    subgraph Backend["Backend Processing"]
-        direction TB
-        ETS["EventTimeSlots Service"]
-        
-        subgraph Parallel["Parallel Queries"]
-            Q1["Query Events<br/>(sessions)"]
-            Q2["Query Schedules<br/>(course-level)"]
-            Q3["Get Policies"]
-        end
-        
-        BUILD["Build Response"]
-    end
-    
-    subgraph Response["Response Structure"]
-        direction TB
-        TS["timeSlots[]<br/>(per session)"]
-        CI["courseInfoByServiceId<br/>(per course)"]
-    end
-    
-    Client --> Backend
-    ETS --> Parallel
-    Parallel --> BUILD
-    BUILD --> Response
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                    PROPOSAL B: UNIFIED SCHEDULE AVAILABILITY                         │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌───────────────┐                                                                  │
+│  │    Client     │                                                                  │
+│  │               │                                                                  │
+│  │ ┌───────────┐ │     ┌─────────────────────────────────────────┐                 │
+│  │ │ List      │─┼────►│         ListEventTimeSlots               │                 │
+│  │ │ TimeSlots │ │     │  (enhanced with schedule info)           │                 │
+│  │ └───────────┘ │     └──────────────────┬──────────────────────┘                 │
+│  │       │       │                        │                                         │
+│  │       │       │         ┌──────────────┼──────────────┐                         │
+│  │       │       │         ▼              ▼              ▼                         │
+│  │       │       │    ┌─────────┐   ┌──────────┐   ┌──────────┐                    │
+│  │       │       │    │ Events  │   │ Schedules│   │ Policies │                    │
+│  │       │       │    │   API   │   │   API    │   │   SPI    │                    │
+│  │       │       │    └─────────┘   └──────────┘   └──────────┘                    │
+│  │       │       │                        │                                         │
+│  │       ▼       │                        ▼                                         │
+│  │ ┌───────────┐ │     ┌─────────────────────────────────────────┐                 │
+│  │ │ Response  │◄┼─────│  ListEventTimeSlotsResponse             │                 │
+│  │ │           │ │     │  + scheduleInfoByServiceId              │                 │
+│  │ │ Ready to  │ │     │  (schedule availability pre-calculated) │                 │
+│  │ │ use!      │ │     └─────────────────────────────────────────┘                 │
+│  │ └───────────┘ │                                                                  │
+│  │               │                                                                  │
+│  └───────────────┘                                                                  │
+│                                                                                     │
+│  New Features:                                                                      │
+│  ● scheduleInfoByServiceId map in response (for classes AND courses)               │
+│  ● provideScheduleAvailabilityOnly flag for quick check                            │
+│  ● Server-side availability calculation with optimizations                          │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Proto Changes
+## Sequence Diagram
 
-```protobuf
-message ListEventTimeSlotsResponse {
-  // Existing fields
-  repeated TimeSlot time_slots = 1;
-  google.protobuf.StringValue time_zone = 2;
-  CursorPagingMetadata paging_metadata = 3;
-  
-  // NEW: Course-level info (no duplication!)
-  map<string, CourseInfo> course_info_by_service_id = 4;
-}
+### Normal Flow (Functionality 2: Full TimeSlots)
 
-message CourseInfo {
-  // For booking
-  google.protobuf.StringValue schedule_id = 1;
-  
-  // Overall course bookability (server-calculated!)
-  google.protobuf.BoolValue course_bookable = 2;
-  
-  // Capacity
-  google.protobuf.Int32Value total_capacity = 3;
-  google.protobuf.Int32Value remaining_capacity = 4;
-  
-  // Timeline
-  google.protobuf.StringValue first_session_start = 5;
-  google.protobuf.StringValue last_session_end = 6;
-  
-  // Session counts
-  google.protobuf.Int32Value total_sessions = 7;
-  google.protobuf.Int32Value remaining_sessions = 8;
-  
-  // Special states
-  google.protobuf.BoolValue started_and_bookable = 9;
-  
-  // Why not bookable
-  CourseNonBookableReasons non_bookable_reasons = 10;
-}
-
-message CourseNonBookableReasons {
-  google.protobuf.BoolValue fully_booked = 1;
-  google.protobuf.BoolValue too_early_to_book = 2;
-  google.protobuf.BoolValue too_late_to_book = 3;
-  google.protobuf.BoolValue book_online_disabled = 4;
-  google.protobuf.BoolValue course_ended = 5;
-}
+```
+    Client              EventTimeSlots         Schedules API       Calendar V3      PolicySPI
+       │                      │                     │                  │                │
+       │ ListEventTimeSlots   │                     │                  │                │
+       │ {serviceIds}         │                     │                  │                │
+       │─────────────────────►│                     │                  │                │
+       │                      │                     │                  │                │
+       │                      │─────────────────────────────────────────────────────────┤
+       │                      │              PARALLEL EXECUTION                          │
+       │                      │─────────────────────────────────────────────────────────┤
+       │                      │                     │                  │                │
+       │                      │ listSchedules       │                  │                │
+       │                      │────────────────────►│                  │                │
+       │                      │                     │                  │                │
+       │                      │                     │  queryEvents     │                │
+       │                      │─────────────────────────────────────►│                │
+       │                      │                     │                  │                │
+       │                      │                     │                  │ listPolicies   │
+       │                      │────────────────────────────────────────────────────────►│
+       │                      │                     │                  │                │
+       │                      │◄────────────────────┼──────────────────┼────────────────┤
+       │                      │                     │                  │                │
+       │                      │ Build:              │                  │                │
+       │                      │ - TimeSlots[]       │                  │                │
+       │                      │ - scheduleInfo      │                  │                │
+       │                      │                     │                  │                │
+       │ Response:            │                     │                  │                │
+       │ - timeSlots[]        │                     │                  │                │
+       │ - scheduleInfoByServiceId                  │                  │                │
+       │◄─────────────────────│                     │                  │                │
 ```
 
-## Implementation Changes
+### Quick Check Flow (Functionality 1: Schedule Availability Only)
 
-### EventTimeSlots.scala
-
-```scala
-class EventTimeSlots(..., schedulesAdapter: SchedulesAdapter) {
-
-  override def listEventTimeSlots(request: ListEventTimeSlotsRequest)
-                                 (implicit cs: CallScope): Future[ListEventTimeSlotsResponse] = {
-    for {
-      // Existing logic
-      (allSlots, hasMoreResults) <- fetchAllSlots(...)
-      
-      // NEW: Identify course services and build CourseInfo
-      courseServiceIds <- identifyCourseServices(request.serviceIds)
-      courseInfoByServiceId <- buildCourseInfoFromSchedules(courseServiceIds)
-      
-    } yield ListEventTimeSlotsResponse(
-      timeSlots = allSlots,
-      timeZone = request.timeZone,
-      pagingMetadata = ...,
-      courseInfoByServiceId = courseInfoByServiceId  // NEW
-    )
-  }
-
-  private def buildCourseInfoFromSchedules(
-    courseServiceIds: Seq[String]
-  )(implicit cs: CallScope): Future[Map[String, CourseInfo]] = {
-    for {
-      // Query Schedule API for accurate course-level data
-      schedules <- schedulesAdapter.listSchedules(
-        scheduleOwnerIds = courseServiceIds,
-        includeTotalNumberOfParticipants = true
-      )
-      
-      policies <- bookingPolicyProvider.listBookingPolicies(courseServiceIds)
-      
-    } yield schedules.map { schedule =>
-      val serviceId = schedule.externalId
-      val policy = policies.find(_.serviceId == serviceId)
-      
-      serviceId -> buildCourseInfo(schedule, policy)
-    }.toMap
-  }
-
-  private def buildCourseInfo(schedule: Schedule, policy: Option[BookingPolicy]): CourseInfo = {
-    val now = LocalDateTime.now()
-    val remainingCapacity = schedule.capacity - schedule.totalNumberOfParticipants
-    
-    val (courseBookable, reasons) = calculateCourseBookability(
-      firstSessionStart = schedule.firstSessionStart,
-      lastSessionEnd = schedule.lastSessionEnd,
-      remainingCapacity = remainingCapacity,
-      policy = policy,
-      now = now
-    )
-    
-    CourseInfo(
-      scheduleId = Some(schedule.id),
-      courseBookable = Some(courseBookable),
-      totalCapacity = schedule.capacity,
-      remainingCapacity = Some(remainingCapacity),
-      firstSessionStart = schedule.firstSessionStart.map(_.toString),
-      lastSessionEnd = schedule.lastSessionEnd.map(_.toString),
-      totalSessions = schedule.totalSessions,
-      remainingSessions = calculateRemainingSessions(schedule, now),
-      startedAndBookable = Some(isStartedAndBookable(schedule, policy, now)),
-      nonBookableReasons = if (courseBookable) None else Some(reasons)
-    )
-  }
-}
+```
+    Client              EventTimeSlots         Schedules API       Calendar V3      PolicySPI
+       │                      │                     │                  │                │
+       │ ListEventTimeSlots   │                     │                  │                │
+       │ {serviceIds,         │                     │                  │                │
+       │  provideSchedule     │                     │                  │                │
+       │  AvailabilityOnly}   │                     │                  │                │
+       │─────────────────────►│                     │                  │                │
+       │                      │                     │                  │                │
+       │                      │ listSchedules       │                  │                │
+       │                      │────────────────────►│                  │                │
+       │                      │◄────────────────────│                  │                │
+       │                      │                     │                  │                │
+       │                      │ listPolicies        │                  │                │
+       │                      │────────────────────────────────────────────────────────►│
+       │                      │◄────────────────────────────────────────────────────────│
+       │                      │                     │                  │                │
+       │                      │ OPTIMIZATION:       │                  │                │
+       │                      │ Check if can skip   │                  │                │
+       │                      │ event query         │                  │                │
+       │                      │                     │                  │                │
+       │                      │─────┐               │                  │                │
+       │                      │     │ If course ended OR                │                │
+       │                      │     │ (started AND !bookAfterStart)     │                │
+       │                      │     │ → Skip event query!               │                │
+       │                      │◄────┘               │                  │                │
+       │                      │                     │                  │                │
+       │                      │ ELSE: Query first   │                  │                │
+       │                      │ bookable event      │                  │                │
+       │                      │─────────────────────────────────────►│                │
+       │                      │◄────────────────────────────────────────│                │
+       │                      │                     │                  │                │
+       │ Response:            │                     │                  │                │
+       │ - timeSlots: [first] │ (or empty)          │                  │                │
+       │ - scheduleInfoByServiceId                  │                  │                │
+       │◄─────────────────────│                     │                  │                │
 ```
 
-## Response Example
+## Decision Flow
 
-```json
-{
-  "time_slots": [
-    {
-      "service_id": "course-123",
-      "schedule_id": "8edc0bb2-...",
-      "local_start_date": "2026-03-05T10:00:00",
-      "bookable": true,
-      "remaining_capacity": 12
-    },
-    {
-      "service_id": "course-123",
-      "schedule_id": "8edc0bb2-...",
-      "local_start_date": "2026-03-12T10:00:00",
-      "bookable": true,
-      "remaining_capacity": 12
-    }
-  ],
-  "course_info_by_service_id": {
-    "course-123": {
-      "schedule_id": "8edc0bb2-2688-4b11-824d-eed023c8cc07",
-      "course_bookable": true,
-      "total_capacity": 20,
-      "remaining_capacity": 12,
-      "first_session_start": "2026-03-05T10:00:00",
-      "last_session_end": "2026-04-30T12:00:00",
-      "total_sessions": 8,
-      "remaining_sessions": 8,
-      "started_and_bookable": false
-    }
-  }
-}
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        PROPOSAL B: DECISION FLOW                                     │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  START                                                                              │
+│    │                                                                                │
+│    ▼                                                                                │
+│  ┌─────────────────────────────────────┐                                           │
+│  │ Validate request                    │                                           │
+│  └─────────────────┬───────────────────┘                                           │
+│                    │                                                                │
+│                    ▼                                                                │
+│  ┌─────────────────────────────────────┐                                           │
+│  │ PARALLEL: Fetch schedules + policies│                                           │
+│  └─────────────────┬───────────────────┘                                           │
+│                    │                                                                │
+│                    ▼                                                                │
+│  ┌─────────────────────────────────────┐                                           │
+│  │ For each schedule:                  │                                           │
+│  │ Calculate schedule availability     │                                           │
+│  └─────────────────┬───────────────────┘                                           │
+│                    │                                                                │
+│        ┌───────────┴───────────┐                                                   │
+│        ▼                       ▼                                                   │
+│  ┌──────────────────┐   ┌──────────────────┐                                       │
+│  │ provideSchedule  │   │ Full query       │                                       │
+│  │ AvailabilityOnly │   │ (default)        │                                       │
+│  │ = true           │   │                  │                                       │
+│  └────────┬─────────┘   └────────┬─────────┘                                       │
+│           │                      │                                                  │
+│           ▼                      ▼                                                  │
+│  ┌─────────────────────────────────────────────────────────────────┐               │
+│  │                    OPTIMIZATION CHECK                           │               │
+│  ├─────────────────────────────────────────────────────────────────┤               │
+│  │                                                                 │               │
+│  │  ┌─────────────────────────────────────────┐                   │               │
+│  │  │ Course ended?                           │                   │               │
+│  │  │ (lastSessionEnd < now)                  │                   │               │
+│  │  └──────────────────┬──────────────────────┘                   │               │
+│  │                     │ YES                                       │               │
+│  │                     ├─────► Mark unavailable, skip events      │               │
+│  │                     │                                           │               │
+│  │                     │ NO                                        │               │
+│  │                     ▼                                           │               │
+│  │  ┌─────────────────────────────────────────┐                   │               │
+│  │  │ Course started AND !bookAfterStart?     │                   │               │
+│  │  └──────────────────┬──────────────────────┘                   │               │
+│  │                     │ YES                                       │               │
+│  │                     ├─────► Mark unavailable, skip events      │               │
+│  │                     │                                           │               │
+│  │                     │ NO                                        │               │
+│  │                     ▼                                           │               │
+│  │  ┌─────────────────────────────────────────┐                   │               │
+│  │  │ Fully booked?                           │                   │               │
+│  │  │ (capacity - participants <= 0)          │                   │               │
+│  │  └──────────────────┬──────────────────────┘                   │               │
+│  │                     │ YES                                       │               │
+│  │                     ├─────► Mark unavailable                   │               │
+│  │                     │                                           │               │
+│  │                     │ NO                                        │               │
+│  │                     ▼                                           │               │
+│  │  ┌─────────────────────────────────────────┐                   │               │
+│  │  │ Too early to book?                      │                   │               │
+│  │  └──────────────────┬──────────────────────┘                   │               │
+│  │                     │ YES                                       │               │
+│  │                     ├─────► Mark unavailable + earliestDate    │               │
+│  │                     │                                           │               │
+│  │                     │ NO                                        │               │
+│  │                     ▼                                           │               │
+│  │                   AVAILABLE                                     │               │
+│  │                                                                 │               │
+│  └─────────────────────────────────────────────────────────────────┘               │
+│                    │                                                                │
+│        ┌───────────┴───────────┐                                                   │
+│        ▼                       ▼                                                   │
+│  ┌──────────────────┐   ┌──────────────────┐                                       │
+│  │ provideSchedule  │   │ Full query:      │                                       │
+│  │ AvailabilityOnly │   │ Query all events │                                       │
+│  │ = true:          │   │ Apply policies   │                                       │
+│  │                  │   │ Map to TimeSlots │                                       │
+│  │ Query first      │   │                  │                                       │
+│  │ bookable event   │   │                  │                                       │
+│  │ OR return empty  │   │                  │                                       │
+│  └────────┬─────────┘   └────────┬─────────┘                                       │
+│           │                      │                                                  │
+│           └──────────┬───────────┘                                                 │
+│                      ▼                                                              │
+│  ┌─────────────────────────────────────┐                                           │
+│  │ Build response:                     │                                           │
+│  │ - timeSlots[]                       │                                           │
+│  │ - scheduleInfoByServiceId{}         │                                           │
+│  └─────────────────┬───────────────────┘                                           │
+│                    │                                                                │
+│                    ▼                                                                │
+│                  END                                                                │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Client Migration
+## Class Diagram (Changes)
 
-```typescript
-// Client code - much simpler!
-const courseInfo = response.courseInfoByServiceId[serviceId];
-
-if (courseInfo) {
-  // Direct access to course bookability
-  const canBook = courseInfo.courseBookable;
-  const scheduleId = courseInfo.scheduleId;
-  const spotsLeft = courseInfo.remainingCapacity;
-  
-  // Show sessions from timeSlots
-  const sessions = response.timeSlots.filter(s => s.serviceId === serviceId);
-  
-  // Display course-level info
-  showCourseInfo({
-    bookable: canBook,
-    totalSessions: courseInfo.totalSessions,
-    remainingSessions: courseInfo.remainingSessions,
-    sessions: sessions
-  });
-}
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        PROPOSAL B: CLASS DIAGRAM CHANGES                             │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │    ListEventTimeSlotsRequest        │                                           │
+│  ├─────────────────────────────────────┤                                           │
+│  │ - providerId: String                │                                           │
+│  │ - fromLocalDate: String             │                                           │
+│  │ - toLocalDate: String               │                                           │
+│  │ - timeZone: String                  │                                           │
+│  │ - serviceIds: List<String>          │                                           │
+│  │ - includeNonBookable: Boolean       │                                           │
+│  │ - minBookableCapacity: Int          │                                           │
+│  │ - eventFilter: Struct               │                                           │
+│  │ - maxSlotsPerDay: Int               │                                           │
+│  │ - cursorPaging: CursorPaging        │                                           │
+│  │ - bookingPolicyViolations: ...      │                                           │
+│  │ + provideScheduleAvailabilityOnly: Boolean ◄───────── NEW                       │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │   ListEventTimeSlotsResponse        │                                           │
+│  ├─────────────────────────────────────┤                                           │
+│  │ - timeSlots: List<TimeSlot>         │                                           │
+│  │ - timeZone: String                  │                                           │
+│  │ - pagingMetadata: CursorPagingMeta  │                                           │
+│  │ + scheduleInfoByServiceId: Map<String, ScheduleInfo> ◄──────── NEW              │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+│  ┌─────────────────────────────────────┐         ┌───────────────────────────────┐ │
+│  │          ScheduleInfo               │◄────────│ NEW MESSAGE                   │ │
+│  ├─────────────────────────────────────┤         │ (works for classes & courses) │ │
+│  │ + scheduleId: String                │         └───────────────────────────────┘ │
+│  │ + isAvailable: Boolean              │                                           │
+│  │ + totalCapacity: Int                │                                           │
+│  │ + remainingCapacity: Int            │                                           │
+│  │ + firstSessionStart: String         │                                           │
+│  │ + lastSessionEnd: String            │                                           │
+│  │ + totalSessions: Int                │                                           │
+│  │ + remainingSessions: Int            │                                           │
+│  │ + startedAndBookable: Boolean       │                                           │
+│  │ + nonBookableReasons: ScheduleNonBookableReasons                                │
+│  └─────────────────────────────────────┘                                           │
+│                     │                                                               │
+│                     ▼                                                               │
+│  ┌─────────────────────────────────────┐                                           │
+│  │   ScheduleNonBookableReasons        │◄─────────── NEW MESSAGE                   │
+│  ├─────────────────────────────────────┤                                           │
+│  │ + fullyBooked: Boolean              │                                           │
+│  │ + tooEarlyToBook: Boolean           │                                           │
+│  │ + earliestBookingDate: Timestamp    │                                           │
+│  │ + tooLateToBook: Boolean            │                                           │
+│  │ + bookOnlineDisabled: Boolean       │                                           │
+│  │ + scheduleEnded: Boolean            │                                           │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │           TimeSlot                  │                                           │
+│  ├─────────────────────────────────────┤                                           │
+│  │ - serviceId: String                 │                                           │
+│  │ - ... (existing fields)             │                                           │
+│  │ - scheduleId: String ◄──────────── NOW POPULATED                                │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Pros & Cons
@@ -441,292 +933,186 @@ if (courseInfo) {
 
 | Benefit | Description |
 |---------|-------------|
-| **Server-side calculation** | `courseBookable` computed on backend |
-| **No data duplication** | CourseInfo at response level |
-| **Complete course info** | All metadata in one place |
-| **Clean separation** | Slots = sessions, CourseInfo = course-level |
-| **Supports multiple courses** | Map keyed by serviceId |
-| **Pagination-safe** | CourseInfo from Schedule API, not paginated events |
+| **Server-side calculation** | `isAvailable` computed on backend |
+| **Supports both functionalities** | Quick check + full query |
+| **Unified for classes AND courses** | Same response structure |
+| **No data duplication** | ScheduleInfo at response level |
+| **Performance optimizations** | Can skip event queries when unavailable |
+| **Backwards compatible** | New fields are optional |
 
 ### ❌ Cons
 
 | Drawback | Description |
 |----------|-------------|
 | **Additional dependency** | Needs SchedulesAdapter |
-| **Extra API call** | Query Schedule API (batched, parallelized) |
-| **More code** | ~200 lines of new code |
-| **Mixed service handling** | Must detect course vs class |
-| **Migration complexity** | Frontend needs to use new fields |
+| **More complex backend** | ~200 lines of new code |
+| **Testing complexity** | More scenarios to test |
+| **Migration needed** | Frontend must adopt new response fields |
 
 ---
 
-# Proposal C: Dedicated Course Availability API
+# Proposal C: Dedicated Course API
 
 ## Overview
 
-**Philosophy:** Create a purpose-built API for course availability that's optimized for the course booking use case.
+**Philosophy:** Create a separate endpoint specifically for course availability, keeping the existing API unchanged.
 
 **Key Changes:**
-1. New endpoint: `/v2/time-slots/course`
-2. Returns course-centric response (not session-centric)
-3. Separate from `ListEventTimeSlots`
-4. Can evolve independently
+1. New endpoint: `/v2/time-slots/course` or new RPC `ListCourseTimeSlots`
+2. Course-centric response structure
+3. Existing `ListEventTimeSlots` remains classes-only
 
-## Architecture
+## Architecture Diagram
 
-```mermaid
-flowchart TB
-    subgraph Client["Client"]
-        C_Class["Class Availability"]
-        C_Course["Course Availability"]
-    end
-    
-    subgraph APIs["Availability APIs"]
-        ETS["ListEventTimeSlots<br/>/v2/time-slots/event<br/>(Classes only)"]
-        CTS["ListCourseTimeSlots<br/>/v2/time-slots/course<br/>(Courses only) ✨ NEW"]
-    end
-    
-    subgraph Backend["Backend Services"]
-        Cal["Calendar V3"]
-        Sched["Schedules"]
-    end
-    
-    C_Class --> ETS
-    C_Course --> CTS
-    
-    ETS --> Cal
-    CTS --> Sched
-    CTS --> Cal
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                      PROPOSAL C: DEDICATED COURSE API                                │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌───────────────┐                                                                  │
+│  │    Client     │                                                                  │
+│  │               │                                                                  │
+│  │ ┌───────────┐ │                                                                  │
+│  │ │ Is Course?│ │                                                                  │
+│  │ └─────┬─────┘ │                                                                  │
+│  │       │       │                                                                  │
+│  │   ┌───┴───┐   │                                                                  │
+│  │   ▼       ▼   │                                                                  │
+│  │ ┌───┐   ┌───┐ │     ┌─────────────────────────────────────────┐                 │
+│  │ │NO │   │YES│─┼────►│       ListCourseTimeSlots (NEW)         │                 │
+│  │ └─┬─┘   └───┘ │     │  (course-centric, schedule-level)       │                 │
+│  │   │           │     └─────────────────────────────────────────┘                 │
+│  │   │           │                                                                  │
+│  │   │           │     ┌─────────────────────────────────────────┐                 │
+│  │   └───────────┼────►│       ListEventTimeSlots (unchanged)    │                 │
+│  │               │     │  (classes only, event-level)            │                 │
+│  │               │     └─────────────────────────────────────────┘                 │
+│  │               │                                                                  │
+│  └───────────────┘                                                                  │
+│                                                                                     │
+│  Two Separate APIs:                                                                 │
+│  ● ListEventTimeSlots → Classes (unchanged)                                         │
+│  ● ListCourseTimeSlots → Courses (NEW)                                              │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Proto Changes
+## Sequence Diagram
 
-```protobuf
-// New file: course_time_slots.proto
-
-service CourseTimeSlots {
-  rpc ListCourseTimeSlots(ListCourseTimeSlotsRequest) 
-      returns (ListCourseTimeSlotsResponse);
-}
-
-message ListCourseTimeSlotsRequest {
-  // Service IDs (must be COURSE type)
-  repeated google.protobuf.StringValue service_ids = 1;
-  
-  // Optional: filter by date range for session display
-  google.protobuf.StringValue from_local_date = 2;
-  google.protobuf.StringValue to_local_date = 3;
-  
-  // Time zone
-  google.protobuf.StringValue time_zone = 4;
-  
-  // Include session details?
-  google.protobuf.BoolValue include_sessions = 5;
-  
-  // Pagination
-  CursorPaging cursor_paging = 6;
-}
-
-message ListCourseTimeSlotsResponse {
-  // One entry per course (not per session!)
-  repeated CourseAvailability courses = 1;
-  
-  google.protobuf.StringValue time_zone = 2;
-  CursorPagingMetadata paging_metadata = 3;
-}
-
-message CourseAvailability {
-  // Course identification
-  google.protobuf.StringValue service_id = 1;
-  google.protobuf.StringValue schedule_id = 2;
-  
-  // Bookability (server-calculated)
-  google.protobuf.BoolValue bookable = 3;
-  
-  // Capacity
-  google.protobuf.Int32Value total_capacity = 4;
-  google.protobuf.Int32Value remaining_capacity = 5;
-  
-  // Timeline
-  google.protobuf.StringValue first_session_start = 6;
-  google.protobuf.StringValue last_session_end = 7;
-  
-  // Sessions info
-  google.protobuf.Int32Value total_sessions = 8;
-  google.protobuf.Int32Value remaining_sessions = 9;
-  
-  // Optional: individual sessions
-  repeated CourseSession sessions = 10;
-  
-  // Policy info
-  BookingPolicyViolations booking_policy_violations = 11;
-  CourseNonBookableReasons non_bookable_reasons = 12;
-  
-  // Resources
-  repeated AvailableResources available_resources = 13;
-  Location location = 14;
-}
-
-message CourseSession {
-  google.protobuf.StringValue event_id = 1;
-  google.protobuf.StringValue local_start_date = 2;
-  google.protobuf.StringValue local_end_date = 3;
-  google.protobuf.BoolValue is_past = 4;
-  google.protobuf.BoolValue is_cancelled = 5;
-}
+```
+    Client              CourseTimeSlots        Schedules API       Calendar V3      PolicySPI
+       │                      │                     │                  │                │
+       │ ListCourseTimeSlots  │                     │                  │                │
+       │ {serviceIds}         │                     │                  │                │
+       │─────────────────────►│                     │                  │                │
+       │                      │                     │                  │                │
+       │                      │ listSchedules       │                  │                │
+       │                      │────────────────────►│                  │                │
+       │                      │◄────────────────────│                  │                │
+       │                      │                     │                  │                │
+       │                      │ listPolicies        │                  │                │
+       │                      │────────────────────────────────────────────────────────►│
+       │                      │◄────────────────────────────────────────────────────────│
+       │                      │                     │                  │                │
+       │                      │ [Optional] querySessions              │                │
+       │                      │─────────────────────────────────────►│                │
+       │                      │◄────────────────────────────────────────│                │
+       │                      │                     │                  │                │
+       │ CourseAvailability[] │                     │                  │                │
+       │ (course-centric)     │                     │                  │                │
+       │◄─────────────────────│                     │                  │                │
 ```
 
-## Implementation
+## Decision Flow
 
-### CourseTimeSlots.scala (New Service)
-
-```scala
-class CourseTimeSlots(
-  context: AvailabilityTimeSlotsContext,
-  schedulesAdapter: SchedulesAdapter,
-  eventsAdapter: EventsAdapter,
-  bookingPolicyProvider: BookingPolicyProvider,
-)(implicit ec: ExecutionContext) extends CourseTimeSlotsLoomPrimed {
-
-  override def listCourseTimeSlots(request: ListCourseTimeSlotsRequest)
-                                  (implicit cs: CallScope): Future[ListCourseTimeSlotsResponse] = {
-    for {
-      // Get schedules for requested services
-      schedules <- schedulesAdapter.listSchedules(
-        scheduleOwnerIds = request.serviceIds,
-        includeTotalNumberOfParticipants = true
-      )
-      
-      // Get booking policies
-      policies <- bookingPolicyProvider.listBookingPolicies(request.serviceIds)
-      policyByServiceId = policies.map(p => p.serviceId -> p).toMap
-      
-      // Optionally get sessions
-      sessionsByScheduleId <- if (request.includeSessions.getOrElse(false)) {
-        fetchSessions(schedules.map(_.id), request.fromLocalDate, request.toLocalDate)
-      } else {
-        Future.successful(Map.empty[String, Seq[Event]])
-      }
-      
-      // Build response
-      courses = schedules.map { schedule =>
-        buildCourseAvailability(
-          schedule = schedule,
-          policy = policyByServiceId.get(schedule.externalId),
-          sessions = sessionsByScheduleId.getOrElse(schedule.id, Seq.empty)
-        )
-      }
-      
-    } yield ListCourseTimeSlotsResponse(
-      courses = courses,
-      timeZone = request.timeZone
-    )
-  }
-
-  private def buildCourseAvailability(
-    schedule: Schedule,
-    policy: Option[BookingPolicy],
-    sessions: Seq[Event]
-  ): CourseAvailability = {
-    val now = LocalDateTime.now()
-    val remainingCapacity = schedule.capacity - schedule.totalNumberOfParticipants
-    
-    val (bookable, reasons) = calculateCourseBookability(schedule, policy, now)
-    
-    CourseAvailability(
-      serviceId = schedule.externalId,
-      scheduleId = Some(schedule.id),
-      bookable = Some(bookable),
-      totalCapacity = schedule.capacity,
-      remainingCapacity = Some(remainingCapacity),
-      firstSessionStart = schedule.firstSessionStart.map(_.toString),
-      lastSessionEnd = schedule.lastSessionEnd.map(_.toString),
-      totalSessions = Some(sessions.size),
-      remainingSessions = Some(sessions.count(s => s.start.isAfter(now))),
-      sessions = sessions.map(mapToSession),
-      bookingPolicyViolations = calculateViolations(schedule, policy, now),
-      nonBookableReasons = if (bookable) None else Some(reasons)
-    )
-  }
-}
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        PROPOSAL C: DECISION FLOW                                     │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  CLIENT DECISION:                                                                   │
+│  ━━━━━━━━━━━━━━━━                                                                   │
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │ Get service type from Services V2   │                                           │
+│  └─────────────────┬───────────────────┘                                           │
+│                    │                                                                │
+│         ┌──────────┴──────────┐                                                    │
+│         ▼                     ▼                                                    │
+│  ┌────────────────┐    ┌────────────────┐                                          │
+│  │ type = CLASS   │    │ type = COURSE  │                                          │
+│  └───────┬────────┘    └───────┬────────┘                                          │
+│          │                     │                                                    │
+│          ▼                     ▼                                                    │
+│  ┌────────────────┐    ┌────────────────┐                                          │
+│  │ Call List      │    │ Call List      │                                          │
+│  │ EventTimeSlots │    │ CourseTimeSlots│                                          │
+│  └────────────────┘    └────────────────┘                                          │
+│                                                                                     │
+│  BACKEND FLOW (ListCourseTimeSlots):                                               │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                                │
+│                                                                                     │
+│  [Same optimization flow as Proposal B for course availability calculation]         │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### BUILD.bazel Updates
+## Class Diagram (Changes)
 
-```bazel
-prime_app(
-    name = "service-availability",
-    # ... existing config ...
-    
-    secondary_services = [
-        "com.wixpress.bookings.availability.v2.MultiServiceAvailabilityTimeSlots",
-        "com.wixpress.bookings.availability.v2.EventTimeSlots",
-        "com.wixpress.bookings.availability.v2.CourseTimeSlots",  # NEW
-    ],
-)
 ```
-
-## Response Example
-
-```json
-{
-  "courses": [
-    {
-      "service_id": "course-123",
-      "schedule_id": "8edc0bb2-2688-4b11-824d-eed023c8cc07",
-      "bookable": true,
-      "total_capacity": 20,
-      "remaining_capacity": 12,
-      "first_session_start": "2026-03-05T10:00:00",
-      "last_session_end": "2026-04-30T12:00:00",
-      "total_sessions": 8,
-      "remaining_sessions": 8,
-      "sessions": [
-        {
-          "event_id": "evt-1",
-          "local_start_date": "2026-03-05T10:00:00",
-          "local_end_date": "2026-03-05T12:00:00",
-          "is_past": false,
-          "is_cancelled": false
-        },
-        {
-          "event_id": "evt-2",
-          "local_start_date": "2026-03-12T10:00:00",
-          "local_end_date": "2026-03-12T12:00:00",
-          "is_past": false,
-          "is_cancelled": false
-        }
-      ],
-      "booking_policy_violations": {
-        "too_early_to_book": false,
-        "too_late_to_book": false,
-        "book_online_disabled": false
-      }
-    }
-  ],
-  "time_zone": "America/Chicago"
-}
-```
-
-## Client Migration
-
-```typescript
-// Client code - purpose-built for courses
-const response = await courseTimeSlotsApi.listCourseTimeSlots({
-  serviceIds: [courseServiceId],
-  includeSessions: true
-});
-
-const course = response.courses[0];
-
-// Everything is course-centric
-showCourseDetails({
-  bookable: course.bookable,
-  scheduleId: course.scheduleId,  // For booking
-  totalCapacity: course.totalCapacity,
-  remainingCapacity: course.remainingCapacity,
-  sessions: course.sessions
-});
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        PROPOSAL C: CLASS DIAGRAM CHANGES                             │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │   ListCourseTimeSlotsRequest        │◄─────────── NEW SERVICE                   │
+│  ├─────────────────────────────────────┤                                           │
+│  │ + serviceIds: List<String>          │                                           │
+│  │ + fromLocalDate: String             │                                           │
+│  │ + toLocalDate: String               │                                           │
+│  │ + timeZone: String                  │                                           │
+│  │ + includeSessions: Boolean          │                                           │
+│  │ + cursorPaging: CursorPaging        │                                           │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │   ListCourseTimeSlotsResponse       │◄─────────── NEW                           │
+│  ├─────────────────────────────────────┤                                           │
+│  │ + courses: List<CourseAvailability> │  ← Course-centric (not TimeSlots)         │
+│  │ + timeZone: String                  │                                           │
+│  │ + pagingMetadata: CursorPagingMeta  │                                           │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │       CourseAvailability            │◄─────────── NEW                           │
+│  ├─────────────────────────────────────┤                                           │
+│  │ + serviceId: String                 │                                           │
+│  │ + scheduleId: String                │                                           │
+│  │ + bookable: Boolean                 │                                           │
+│  │ + totalCapacity: Int                │                                           │
+│  │ + remainingCapacity: Int            │                                           │
+│  │ + firstSessionStart: String         │                                           │
+│  │ + lastSessionEnd: String            │                                           │
+│  │ + totalSessions: Int                │                                           │
+│  │ + remainingSessions: Int            │                                           │
+│  │ + sessions: List<CourseSession>     │  ← Optional, if includeSessions=true      │
+│  │ + bookingPolicyViolations: ...      │                                           │
+│  │ + nonBookableReasons: ...           │                                           │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+│  ┌─────────────────────────────────────┐                                           │
+│  │         CourseSession               │◄─────────── NEW                           │
+│  ├─────────────────────────────────────┤                                           │
+│  │ + eventId: String                   │                                           │
+│  │ + localStartDate: String            │                                           │
+│  │ + localEndDate: String              │                                           │
+│  │ + isPast: Boolean                   │                                           │
+│  │ + isCancelled: Boolean              │                                           │
+│  └─────────────────────────────────────┘                                           │
+│                                                                                     │
+│  [ListEventTimeSlots remains UNCHANGED - classes only]                              │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Pros & Cons
@@ -736,22 +1122,19 @@ showCourseDetails({
 | Benefit | Description |
 |---------|-------------|
 | **Purpose-built** | Optimized for course use case |
-| **Clean API** | Course-centric response, not session-centric |
+| **Clean semantics** | Course-centric response |
 | **Independent evolution** | Can add course features without affecting classes |
-| **No backwards compatibility** | Fresh start, no legacy constraints |
-| **Clear semantics** | CourseAvailability.bookable = can book course |
-| **Optional sessions** | Include sessions only when needed |
+| **No breaking changes** | Existing API untouched |
 
 ### ❌ Cons
 
 | Drawback | Description |
 |----------|-------------|
-| **New service** | Additional code, testing, documentation |
 | **API fragmentation** | Two endpoints for event-based availability |
-| **Discovery** | Clients must know which API to use |
+| **Client complexity** | Must know which API to call |
 | **Duplicate logic** | Some shared code with EventTimeSlots |
-| **Migration burden** | Full frontend rewrite for courses |
 | **Maintenance cost** | Two APIs to maintain |
+| **Redundant** | If Proposal B handles both, this is unnecessary |
 
 ---
 
@@ -762,77 +1145,35 @@ showCourseDetails({
 | Feature | Proposal A | Proposal B | Proposal C |
 |---------|-----------|-----------|-----------|
 | **scheduleId in response** | ✅ | ✅ | ✅ |
-| **courseBookable server-side** | ❌ | ✅ | ✅ |
-| **No data duplication** | ❌ | ✅ | ✅ |
-| **Course metadata (dates, sessions)** | ❌ | ✅ | ✅ |
+| **Functionality 1 (quick check)** | ❌ Client-side | ✅ Server-side | ✅ Server-side |
+| **Functionality 2 (full query)** | ✅ | ✅ | ✅ |
 | **Single unified API** | ✅ | ✅ | ❌ |
+| **Works for classes** | ✅ | ✅ | ❌ (separate API) |
+| **Works for courses** | ✅ | ✅ | ✅ |
 | **Minimal changes** | ✅ | ❌ | ❌ |
-| **Independent evolution** | ❌ | ⚠️ | ✅ |
+| **Performance optimizations** | ❌ | ✅ | ✅ |
 | **Clear semantics** | ⚠️ | ✅ | ✅ |
 
 ## Implementation Effort
 
 | Aspect | Proposal A | Proposal B | Proposal C |
 |--------|-----------|-----------|-----------|
-| **Proto changes** | ~10 lines | ~80 lines | ~150 lines |
-| **Backend code** | ~20 lines | ~200 lines | ~400 lines |
-| **New dependencies** | None | SchedulesAdapter | SchedulesAdapter, EventsAdapter |
-| **Test cases** | ~10 | ~30 | ~50 |
+| **New messages** | 0 | 2 | 4 |
+| **Backend code** | ~5 lines | ~200 lines | ~400 lines |
+| **New dependencies** | None | SchedulesAdapter | SchedulesAdapter |
+| **Test cases** | ~5 | ~30 | ~50 |
 | **Documentation** | Minimal | Moderate | Full API docs |
-| **Estimated effort** | 2-3 days | 1-2 weeks | 3-4 weeks |
+| **Estimated effort** | Hours | 1-2 weeks | 3-4 weeks |
 
 ## Risk Assessment
 
 | Risk | Proposal A | Proposal B | Proposal C |
 |------|-----------|-----------|-----------|
-| **Breaking changes** | Very Low | Low | Medium |
-| **Performance regression** | Very Low | Low | Low |
+| **Breaking changes** | None | Low (additive) | Medium |
+| **Performance regression** | None | Low | Low |
 | **Integration issues** | Very Low | Medium | High |
 | **Client migration** | Easy | Moderate | Hard |
 | **Rollback difficulty** | Easy | Easy | Hard |
-
-## Client Impact
-
-| Aspect | Proposal A | Proposal B | Proposal C |
-|--------|-----------|-----------|-----------|
-| **API calls saved** | 2 (3→1) | 2 (3→1) | 2 (3→1) |
-| **Client logic removed** | Some | Most | All |
-| **Migration complexity** | Low | Medium | High |
-| **New patterns to learn** | None | CourseInfo map | New API |
-
----
-
-# Decision Framework
-
-## When to Choose Proposal A
-
-Choose **Proposal A (Minimal Enhancement)** if:
-
-- ⏰ Time-to-market is critical (need it in days, not weeks)
-- 🎯 Goal is just to reduce API calls, not move logic to server
-- 📊 Client team prefers to keep existing calculation logic
-- 🔒 Risk tolerance is very low
-- 📈 This is a temporary solution before larger refactor
-
-## When to Choose Proposal B
-
-Choose **Proposal B (Unified Response-Level CourseInfo)** if:
-
-- ✅ Goal is unified API for classes AND courses
-- 🧮 Want to move bookability logic to server
-- 📦 Prefer not to fragment APIs
-- 🔄 Frontend team ready for moderate migration
-- ⚖️ Willing to accept medium complexity for better design
-
-## When to Choose Proposal C
-
-Choose **Proposal C (Dedicated Course API)** if:
-
-- 🎯 Course use case has unique requirements
-- 🔮 Expect significant divergence from class logic
-- 👥 Separate teams own class vs course features
-- 📚 Want clearest possible API semantics
-- 🏗️ Building for long-term, not quick fix
 
 ---
 
@@ -840,104 +1181,37 @@ Choose **Proposal C (Dedicated Course API)** if:
 
 ## Primary Recommendation: Proposal B
 
-**I recommend Proposal B (Unified Response-Level CourseInfo)** for the following reasons:
+**I recommend Proposal B (Unified Schedule Availability)** for the following reasons:
 
-### 1. Best Balance of Trade-offs
+### 1. Achieves Both Functionalities
 
-```
-                    Simplicity ◄─────────────────────► Completeness
-                         │                                   │
-Proposal A: ─────────────┼─────────●                        │
-                         │                                   │
-Proposal B: ─────────────┼─────────────────●                │
-                         │                                   │
-Proposal C: ─────────────┼──────────────────────────────────●
-                         │                                   │
-                    (too simple)                      (overkill)
-```
+| Functionality | How Proposal B Delivers |
+|---------------|-------------------------|
+| **1. Quick availability check** | `provideScheduleAvailabilityOnly=true` + `scheduleInfoByServiceId` |
+| **2. Full TimeSlots query** | Standard flow with `scheduleInfoByServiceId` included |
 
-### 2. Achieves Key Goals
+### 2. Works for Both Service Types
 
-| Goal | Proposal B Delivers |
-|------|---------------------|
-| Reduce API calls | ✅ 3 → 1 |
-| Server-side bookability | ✅ `courseBookable` |
-| No data duplication | ✅ Response-level CourseInfo |
-| Unified API | ✅ Same endpoint for class + course |
-| Backwards compatible | ✅ New optional fields |
+- Classes: `scheduleInfoByServiceId` contains class schedule availability
+- Courses: Same structure, with course-specific calculations
 
-### 3. Right Level of Investment
+### 3. Enables Performance Optimizations
 
-- **Not too little** (unlike Proposal A): Actually solves the problem
-- **Not too much** (unlike Proposal C): Doesn't require new service
+- Can skip event queries when unavailable
+- Parallel execution of schedules + policies fetch
+- Smart early termination for courses
 
-### 4. Enables Future Evolution
+### 4. Backwards Compatible
 
-```mermaid
-flowchart LR
-    subgraph Today["Proposal B (Today)"]
-        A["Unified API<br/>Class + Course"]
-    end
-    
-    subgraph Future["Future Options"]
-        B["Keep unified"]
-        C["Split if needed"]
-    end
-    
-    Today --> B
-    Today --> C
-```
+- All new fields are optional
+- Existing clients continue to work
+- Gradual migration possible
 
-If course requirements diverge significantly, Proposal C can still be implemented later.
+## Alternative Path
 
-### 5. Implementation Roadmap
+If time is critical:
 
-```mermaid
-gantt
-    title Proposal B Implementation
-    dateFormat  YYYY-MM-DD
-    
-    section Phase 1
-    scheduleId population    :p1a, 2024-01-15, 2d
-    
-    section Phase 2
-    Proto definitions        :p2a, after p1a, 3d
-    CourseInfo builder       :p2b, after p2a, 4d
-    Bookability calculator   :p2c, after p2b, 3d
-    
-    section Phase 3
-    Unit tests              :p3a, after p2c, 3d
-    Integration tests       :p3b, after p3a, 3d
-    
-    section Phase 4
-    Feature flag            :p4a, after p3b, 1d
-    Gradual rollout         :p4b, after p4a, 5d
-```
+1. **Week 1**: Implement Proposal A (populate scheduleId) - immediate value
+2. **Week 3-4**: Evolve to Proposal B (add scheduleInfoByServiceId)
 
----
-
-## Alternative Recommendation: Proposal A as Interim
-
-If time constraints are severe, implement **Proposal A first**, then evolve to **Proposal B**:
-
-```mermaid
-flowchart LR
-    A["Week 1:<br/>Proposal A<br/>(scheduleId + isCourse)"] 
-    --> B["Week 3-4:<br/>Proposal B<br/>(CourseInfo)"]
-    
-    style A fill:#ffcc99
-    style B fill:#99ff99
-```
-
-This gives immediate value (reduces API calls) while building toward the complete solution.
-
----
-
-## Summary
-
-| If... | Then Choose |
-|-------|-------------|
-| Need it immediately | Proposal A |
-| Want the right solution | **Proposal B** ✅ |
-| Courses will diverge significantly | Proposal C |
-
+This provides incremental value while building toward the complete solution.
