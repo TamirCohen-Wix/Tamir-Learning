@@ -4,93 +4,123 @@
 **Owner**: Bookings Platform Team  
 **Date**: January 17, 2026  
 **Status**: Draft for Review  
-**Version**: 2.0
+**Version**: 3.0
 
 ---
 
 ## Table of Contents
 
-1. [Context: Availability Domains](#1-context-availability-domains)
-2. [Problems We Are Solving](#2-problems-we-are-solving)
-3. [General Availability Data Flow](#3-general-availability-data-flow)
-4. [Current Course Availability Implementation](#4-current-course-availability-implementation)
-5. [Proposed Solution: New Course Availability Endpoint](#5-proposed-solution-new-course-availability-endpoint)
-6. [Data Sources Analysis](#6-data-sources-analysis)
-7. [Design Decision: New Endpoint vs Extending ListEventTimeSlots](#7-design-decision-new-endpoint-vs-extending-listeventtimeslots)
-8. [Implementation & Rollout Plan](#8-implementation--rollout-plan)
-9. [Open Questions](#9-open-questions)
+- [Background + How to use](#background--how-to-use)
+- [📘 Context](#-context)
+- [📘 Relevant Material](#-relevant-material)
+- [📘 Requirements](#-requirements)
+- [📘 High Level Design](#-high-level-design)
+- [📘 Current Architecture](#-current-architecture)
+- [📘 Planned Design Description](#-planned-design-description)
+- [📘 Target Design Blueprint](#-target-design-blueprint)
+- [📘 Alternative Solutions / Design Dilemmas](#-alternative-solutions--design-dilemmas)
+- [📘 APIs](#-apis)
+- [✅ Wix Ecosystem Requirements](#-wix-ecosystem-requirements)
+- [✅ Non Functional Requirements](#-non-functional-requirements)
+- [Open Questions](#open-questions)
+- [Meeting Summaries and Decisions](#meeting-summaries-and-decisions)
+- [Execution Plan](#execution-plan)
 
 ---
 
-## 1. Context: Availability Domains
+## Background + How to use
 
-### Two Domains of Availability
+This document outlines the design for adding course availability support to the `service-availability` module via a new dedicated endpoint `ListCourseEventTimeSlots`. This enables deprecation of the legacy `AvailabilityCalendar.getScheduleAvailability` and provides a modern, unified API pattern for all service types.
 
-Availability in Wix Bookings is conceptually divided into **two distinct domains**, each serving different purposes with different consistency and performance requirements:
+**How to use this document**:
+1. Review the **Context** section to understand the problem space and availability domains
+2. Review **Current Architecture** to understand what exists today
+3. Review **Planned Design** for the proposed solution
+4. Check **Open Questions** for items requiring decisions
+5. Use **Execution Plan** for implementation tracking
+
+---
+
+## 📘 Context
+
+### Unified Availability Model
+
+The new course availability endpoint uses **eventually consistent data** (from `Event.remainingCapacity`) for **BOTH** display and booking validation - the same pattern already proven with classes via `ListEventTimeSlots`.
 
 ```mermaid
 flowchart TB
-    subgraph "Availability Domains"
-        direction LR
-        subgraph "Events Availability (Display)"
-            EA[Event-Based Availability]
-            EA_P[Fast Response<br/>Eventual Consistency<br/>UI/Display Purpose]
+    subgraph "Unified Availability"
+        direction TB
+        EP[CourseEventTimeSlots Endpoint]
+        
+        subgraph "Use Cases (Same Data Source)"
+            UI[UI Display<br/>Bookings Widget, Calendar]
+            VAL[Booking Validation<br/>createBooking flow]
         end
         
-        subgraph "Booking Availability (Validation)"
-            BA[Booking-Based Availability]
-            BA_P[Consistent Data<br/>Business Validation<br/>Authoritative Check]
+        subgraph "Data Source"
+            EV[Event.remainingCapacity<br/>Eventually Consistent]
         end
     end
     
-    EA --> EA_P
-    BA --> BA_P
+    EP --> UI
+    EP --> VAL
+    UI --> EV
+    VAL --> EV
 ```
 
-### Comparison: Events Availability vs Booking Availability
+### Why This Works for Both Use Cases
 
-| Aspect | Events Availability | Booking Availability |
-|--------|---------------------|---------------------|
-| **Purpose** | UI display, calendar views, slot listing | Core business flow validation, booking creation |
-| **Consistency** | Eventually consistent (1-5 second lag acceptable) | Must be consistent (authoritative source of truth) |
-| **Performance Priority** | High - must be fast for user experience | Can tolerate higher latency for accuracy |
-| **Typical Latency** | Target: Fast response for UI rendering | Can be slower in exchange for consistency |
-| **Data Source** | Event.remainingCapacity (pre-calculated) | Query Bookings/Participations directly |
-| **Risk of Stale Data** | Acceptable - user will retry if booking fails | Not acceptable - could lead to overbooking |
-| **Use Cases** | Bookings Widget, Calendar Views, Mobile Apps | createBooking validation, confirmBooking |
+| Concern | Why It's Acceptable |
+|---------|---------------------|
+| **"Validation needs consistent data"** | Policy checks (tooEarly, tooLate, etc.) ARE consistent - only capacity is eventual |
+| **"Could lead to overbooking"** | Race window is small; platform allows negative `remainingCapacity`; handled operationally |
+| **"User sees wrong availability"** | If stale, booking fails gracefully; user retries; better than slow response |
+| **"Different from appointments"** | Appointments have resource exclusivity (1:1); classes/courses have shared capacity (N:1) |
+
+### Trade-offs We Accept
+
+| Trade-off | What We Get | What We Give Up |
+|-----------|-------------|-----------------|
+| **Eventual consistency** | Fast response, no extra RPC to Bookings | Rare race condition for last spot |
+| **Unified endpoint** | Simpler architecture, one source of truth | Can't have different consistency per use case |
+| **Event-based capacity** | No aggregation queries, pre-calculated | Small window of stale data after booking |
+
+### Edge Cases and Platform Handling
+
+| Edge Case | What Happens | How Handled |
+|-----------|--------------|-------------|
+| **Two users book last spot simultaneously** | Both pass availability check, both bookings created | `Event.remainingCapacity` becomes negative; business handles operationally (refund/reschedule) |
+| **User sees "1 spot" but booking fails** | Event was just updated, UI was stale | User sees error, retries, gets fresh data |
+| **Capacity shows negative** | More bookings than capacity | Display can clamp to 0; no functional impact |
+| **Policy check fails** | `tooLateToBook`, `bookOnlineDisabled`, etc. | These are ALWAYS consistent (time-based, config-based) - no race possible |
+
+### Why NOT Separate Display vs Validation Endpoints
+
+| Reason | Explanation |
+|--------|-------------|
+| **Proven pattern** | `ListEventTimeSlots` for classes already uses this model for both use cases |
+| **Complexity** | Maintaining two data paths (eventual + consistent) doubles code and testing |
+| **Performance** | Consistent queries to Bookings add latency; not justified for shared-capacity services |
+| **Rare failure mode** | Overbooking race is extremely rare (requires two requests for last spot within ms) |
+| **Graceful degradation** | If eventual data causes booking failure, user gets clear error and can retry |
 
 ### Current Implementation Landscape
 
-| Service | Domain | Service Types Supported | Status |
-|---------|--------|------------------------|--------|
-| `AvailabilityTimeSlots` | Events Availability | Appointments | ✅ Active |
-| `EventTimeSlots` (ListEventTimeSlots) | Events Availability | Classes | ✅ Active |
-| `MultiServiceAvailabilityTimeSlots` | Events Availability | Multi-Service | ✅ Active |
-| **Course Availability** | Events Availability | Courses | ❌ **Missing** |
-| `AvailabilityCalendar.getScheduleAvailability` | Booking Availability | Courses | ⚠️ **Deprecated** |
-| `AvailabilityCalendar.getSlotAvailability` | Booking Availability | Classes/Appointments | ⚠️ **Deprecated** |
+| Service | Service Types | Used For | Status |
+|---------|---------------|----------|--------|
+| `AvailabilityTimeSlots` | Appointments | Display + Validation | ✅ Active |
+| `EventTimeSlots` (ListEventTimeSlots) | Classes | Display + Validation | ✅ Active |
+| `MultiServiceAvailabilityTimeSlots` | Multi-Service | Display + Validation | ✅ Active |
+| **Course Availability** | Courses | - | ❌ **Missing** |
+| `AvailabilityCalendar.getScheduleAvailability` | Courses | Validation only | ⚠️ **Deprecated** |
+| `AvailabilityCalendar.getSlotAvailability` | Classes/Appointments | Validation only | ⚠️ **Deprecated** |
 
-### Why This Separation Matters
-
-**Events Availability (Display Domain)**:
-- Users browse availability before deciding to book
-- Stale data results in a minor inconvenience (failed booking attempt → retry)
-- Performance directly impacts user experience and page load times
-- High query volume (many users browsing, few actually booking)
-
-**Booking Availability (Validation Domain)**:
-- Called during actual booking creation
-- Stale data could result in overbooking or incorrect rejection
-- Lower volume but higher importance per request
-- Must validate against real-time capacity
-
----
-
-## 2. Problems We Are Solving
+### Problems We Are Solving
 
 This design document addresses three categories of problems:
 
-### 2.1 Client Support Experience & Performance
+#### 1. Client Support Experience & Performance
 
 | Problem | Description | Impact |
 |---------|-------------|--------|
@@ -100,14 +130,14 @@ This design document addresses three categories of problems:
 | **Multiple API calls required** | Clients need 3+ API calls for course availability | Higher latency, more complexity |
 | **Deprecated API usage** | Clients forced to use deprecated Schedule V1 and AvailabilityCalendar | Technical debt, migration blocker |
 
-### 2.2 Deprecated API Migration
+#### 2. Complete Migration from Deprecated APIs
 
 The following deprecated APIs must be fully replaced:
 
 | Deprecated API | Replacement | Migration Status |
 |----------------|-------------|------------------|
-| `Schedule V1` (schedules proxy) | Schedule V3 + Services V2 | 🔄 In Progress |
-| `AvailabilityCalendar.getScheduleAvailability` | **NEW: Course Availability Endpoint** | ❌ No replacement exists |
+| `Schedule V1` (schedules proxy) | Schedule V3 + ScheduleTimeFrames V3 | 🔄 In Progress |
+| `AvailabilityCalendar.getScheduleAvailability` | **NEW: CourseEventTimeSlots Endpoint** | ❌ No replacement exists |
 | `AvailabilityCalendar.getSlotAvailability` | `EventTimeSlots.listEventTimeSlots` | 🔄 In Progress (via feature toggle) |
 
 **Services Still Using Deprecated AvailabilityCalendar**:
@@ -119,7 +149,7 @@ The following deprecated APIs must be fully replaced:
 | Bookings Gateway | `getSlotAvailability` | Availability validation | 🔄 In Progress |
 | Waiting List Service | `getSlotAvailability` | Check spots on booking cancellation | ✅ Yes |
 
-### 2.3 Platform Consistency
+#### 3. Platform Consistency
 
 | Issue | Description |
 |-------|-------------|
@@ -127,9 +157,9 @@ The following deprecated APIs must be fully replaced:
 | **Missing modern API for courses** | `service-availability` module supports appointments, classes, multi-service - but NOT courses |
 | **Documentation recommends deprecated flow** | Official Wix docs direct users to deprecated APIs |
 
-### 2.4 New UI/UX Capabilities Enabled
+### New UI/UX Capabilities Enabled
 
-The new course availability endpoint enables several UI/UX improvements that are currently impossible or require complex client-side logic:
+The new course availability endpoint enables several UI/UX improvements:
 
 ```mermaid
 flowchart TB
@@ -150,30 +180,12 @@ flowchart TB
 
 | Capability | Description | User Value |
 |------------|-------------|------------|
-| **Filter Bookable Courses** | On the services-list page, filter and show only courses that are currently bookable (not full, within booking window) | Users don't waste time clicking into unavailable courses |
+| **Filter Bookable Courses** | On the services-list page, filter and show only courses that are currently bookable | Users don't waste time clicking into unavailable courses |
 | **Session Availability Indicators** | On the course service-page, mark which individual sessions are still available vs. already occurred | Clear visual indication of what the user will attend |
 | **Partial Enrollment Messaging** | When booking a course with `bookAfterStartPolicy = true`, display message like *"Your registration will include 22/25 sessions in this course"* | Transparent communication about what user is purchasing |
 | **Past Sessions Visual Treatment** | Gray out or visually differentiate sessions that have already occurred | Clear UX that past sessions won't be attended |
-| **Per-Session Capacity Display** | Show remaining spots for each session (if they differ) | Better capacity planning for users |
 
-**Example UI Mockup - Partial Enrollment Message**:
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  🎓 Advanced Photography Course                         │
-│                                                         │
-│  ⚠️ This course has already started                     │
-│                                                         │
-│  Your registration will include 22 of 25 sessions.     │
-│  3 sessions have already occurred and are grayed out.  │
-│                                                         │
-│  [ View Sessions ]  [ Book Now - $199 ]                │
-└─────────────────────────────────────────────────────────┘
-```
-
-### 2.5 Business Context: bookAfterStartPolicy Usage
-
-Understanding the real-world usage of the `bookAfterStartPolicy` is critical for prioritizing this feature:
+### Business Context: bookAfterStartPolicy Usage
 
 **DORA Data Analysis**:
 
@@ -183,31 +195,111 @@ Understanding the real-world usage of the `bookAfterStartPolicy` is critical for
 | **Total active courses with bookings** | 205,612 |
 | **Percentage with policy enabled** | **33.93%** |
 
-> **Definition**: Active courses = not deleted, with at least one confirmed booking in the last 365 days, and `bookAfterStartPolicy.enabled = true`
+> **Definition**: Active courses = not deleted, with at least one confirmed booking in the last 365 days
 
 **Key Insights**:
-
-| Insight | Implication |
-|---------|-------------|
-| **~1 in 3 courses allow late enrollment** | Significant demand for partial enrollment functionality |
-| **~2 in 3 courses use standard policy** | Most courses prefer customers to enroll before start |
-| **33% is substantial** | This is not an edge case - nearly 70K courses rely on this policy |
-| **Business value of late enrollment** | Ongoing programs, certification courses, and rolling-admission courses benefit from late-entry |
-
-**Why This Matters for Implementation**:
-
-1. **Must support `bookAfterStartPolicy`**: Cannot ship course availability without this - affects 33% of courses
-2. **Requires SPI extension**: Current `BookingPolicyProvider` SPI doesn't include this field
-3. **UI implications**: Need to handle partial enrollment messaging for 70K+ courses
-4. **Backward compatibility**: Courses without this policy should work exactly as before
+- ~1 in 3 courses allow late enrollment - significant demand for partial enrollment functionality
+- This is NOT an edge case - nearly 70K courses rely on this policy
+- Must support `bookAfterStartPolicy` - affects 33% of courses
 
 ---
 
-## 3. General Availability Data Flow
+## 📘 Relevant Material
 
-### Availability Calculation Components
+### Links to JIRA / Slack Threads
 
-All availability endpoints follow a common pattern with these components:
+- **JIRA**: [To be created]
+- **Design Research**: `/bookings-backend/service-availability/docs/research/`
+- **Draft Document**: `/bookings-backend/service-availability/docs/course-availability-design-draft.md`
+
+### Communication Channels on Slack
+
+- **Primary**: `#bookings-platform`
+- **Architecture Review**: `#server-guild-architecture`
+- **Dependencies**: `#services-team`, `#calendar-team`
+
+### External Documentation
+
+- [Wix Bookings End-to-End Booking Flows - Book a Course](https://dev.wix.com/docs/api-reference/business-solutions/bookings/end-to-end-booking-flows#book-a-course)
+- [List Event Time Slots API](https://dev.wix.com/docs/api-reference/business-solutions/bookings/time-slots/time-slots-v2/list-event-time-slots)
+
+> ⚠️ **ACTION ITEM**: Update official documentation to reflect new course availability endpoint once implemented.
+
+---
+
+## 📘 Requirements
+
+### Product Description
+
+**Goal**: Enable course availability through a modern API in the `service-availability` module, providing unified API patterns for all service types (appointments, classes, courses).
+
+**Use Cases**:
+1. **Bookings Widget** (frontend): Display course session availability in calendar view
+2. **Mobile Apps**: Show bookable course sessions with real-time capacity
+3. **Third-Party Integrations**: Partner systems query course availability
+4. **Vibe Integration**: Modern headless booking flows
+
+### Scope - What Will/Won't Be Covered
+
+**✅ IN SCOPE**:
+- New `ListCourseEventTimeSlots` endpoint in service-availability
+- Server-side policy enforcement for booking policies:
+  - `limitEarlyBooking`
+  - `limitLateBooking`
+  - `bookAfterStartPolicy` ⚠️ **NEW - requires SPI extension**
+  - `bookOnlineDisabled`
+  - `remainingCapacity`
+- Schedule-level policy calculation using `ScheduleTimeFrames V3.firstEventStartDate`
+- Gradual rollout with feature flag
+- Integration with Bookings service via AvailabilityCalendar proxy layer
+
+**❌ OUT OF SCOPE**:
+- Waitlist support for courses (future consideration)
+- Materialized participant count (use Events V3 `remainingCapacity`)
+- Changes to booking creation flow (availability only)
+
+### Assumptions
+
+1. **Events V3** provides accurate `remainingCapacity` per session (eventually consistent)
+2. **ScheduleTimeFrames V3** provides `firstEventStartDate` and `lastEventEndDate`
+3. Course rescheduling is **infrequent** (hours/days between changes)
+4. Eventually consistent data is **acceptable** for availability display
+5. `createBooking` validation will catch any race conditions (authoritative check)
+
+### Constraints
+
+**Dependencies**:
+- ScheduleTimeFrames V3 API (existing - no changes required)
+- Events V3 API (existing - no changes required)
+- `BookingPolicyProvider` SPI extension required (add `bookAfterStartPolicy`)
+
+**Technical Constraints**:
+- Must maintain backward compatibility (no breaking changes)
+- Must follow Wix Server Guild standards and Loom Prime framework
+
+---
+
+## 📘 High Level Design
+
+### Solution Overview
+
+Create a new dedicated endpoint `ListCourseEventTimeSlots` in the `service-availability` module, following the same pattern as existing endpoints:
+
+```mermaid
+flowchart LR
+    subgraph "service-availability Module"
+        ATS[AvailabilityTimeSlots<br/>Appointments]
+        ETS[EventTimeSlots<br/>Classes]
+        MSTS[MultiServiceAvailabilityTimeSlots<br/>Multi-Service]
+        CETS[CourseEventTimeSlots<br/>Courses - NEW]
+    end
+    
+    style CETS fill:#90EE90
+```
+
+### General Availability Data Flow
+
+All availability endpoints follow a common pattern:
 
 ```mermaid
 flowchart TD
@@ -223,9 +315,7 @@ flowchart TD
         QE[Query Events<br/>by schedule/date range]
         QS[Query Services<br/>service type, metadata]
         QBP[Query Booking Policies<br/>via SPI]
-        QP[Query Participants<br/>capacity data]
         QTF[Query TimeFrames<br/>first/last session dates]
-        QR[Query Resources<br/>staff, rooms, equipment]
     end
     
     subgraph "Calculation Layer"
@@ -235,57 +325,34 @@ flowchart TD
     end
     
     subgraph "Response Layer"
-        MAP[Map to Response Model<br/>TimeSlot/Availability]
+        MAP[Map to Response Model]
         PAGE[Apply Pagination]
         RES[Return Response]
     end
     
     REQ --> FILTER
-    REQ --> CURSOR
-    REQ --> CTX
-    
     FILTER --> QE
     FILTER --> QS
     FILTER --> QBP
-    FILTER --> QP
     FILTER --> QTF
-    FILTER --> QR
-    
-    QE --> CALC_POLICY
-    QS --> CALC_POLICY
-    QBP --> CALC_POLICY
-    QTF --> CALC_POLICY
     
     QE --> CALC_CAPACITY
-    QP --> CALC_CAPACITY
+    QTF --> CALC_POLICY
+    QBP --> CALC_POLICY
     
     CALC_POLICY --> CALC_BOOKABLE
     CALC_CAPACITY --> CALC_BOOKABLE
     
     CALC_BOOKABLE --> MAP
-    QR --> MAP
     MAP --> PAGE
-    CURSOR --> PAGE
     PAGE --> RES
 ```
 
-### Data Flow Steps
-
-| Step | Description | Input | Output |
-|------|-------------|-------|--------|
-| **1. Query Data** | Fetch all required data from various sources | Request filters | Raw data from Events, Services, Policies, Participants, TimeFrames, Resources |
-| **2. Calculate Policy Violations** | Determine if booking policies are violated | Event/Schedule times, Booking Policies | `tooEarlyToBook`, `tooLateToBook`, `bookOnlineDisabled` |
-| **3. Calculate Open Spots** | Determine remaining capacity | Event participants or Bookings count | `remainingCapacity`, `openSpots` |
-| **4. Determine Bookable Status** | Combine policy and capacity checks | Policy violations, Open spots | `bookable` boolean |
-| **5. Map & Return** | Format response with pagination | Calculated availability | TimeSlots/Availability response |
-
 ---
 
-## 4. Current Course Availability Implementation
+## 📘 Current Architecture
 
-### 4.1 Internal Client Flow (Wix Bookings Widget)
-
-The internal Bookings Widget currently calculates course availability using the following flow:
+### Current Course Availability - Internal Client (Bookings Widget)
 
 ```mermaid
 sequenceDiagram
@@ -309,20 +376,9 @@ sequenceDiagram
     Widget->>Widget: Display availability to user
 ```
 
-**Issues with Current Internal Client Flow**:
+### Current Course Availability - External Client (Third-Party)
 
-| Issue | Description | Impact |
-|-------|-------------|--------|
-| **Server logic on client** | Widget calculates booking policies and remaining spots | Logic duplication, inconsistency risk |
-| **Blocks server updates** | New policy (e.g., `bookAfterStartPolicy`) requires widget update | Feature velocity bottleneck |
-| **Version inconsistency** | Different widget versions may calculate differently | Business logic fragmentation |
-| **Multiple API calls** | 3 sequential API calls required | Higher latency (sequential, not parallel) |
-| **Uses deprecated Schedule V1** | Schedule V1 marked for deprecation | Migration blocker |
-| **Expensive aggregation** | Schedule V1 internally calls 4 services, aggregates participants | Performance bottleneck |
-
-### 4.2 External Client Flow (Third-Party Integrations)
-
-According to the [Wix Bookings End-to-End Booking Flows documentation](https://dev.wix.com/docs/api-reference/business-solutions/bookings/end-to-end-booking-flows#book-a-course), external clients must follow this flow:
+According to the [official documentation](https://dev.wix.com/docs/api-reference/business-solutions/bookings/end-to-end-booking-flows#book-a-course):
 
 ```mermaid
 sequenceDiagram
@@ -339,98 +395,96 @@ sequenceDiagram
     
     Note over Client: 3. CLIENT-SIDE CALCULATION<br/>Sum attendance.numberOfAttendees<br/>remainingSpots = defaultCapacity - total
     
-    Note over Client: 4. Validate numberOfParticipants<br/>against remaining spots
-    
-    Client->>CreateBooking: 5. Create Booking
+    Client->>CreateBooking: 4. Create Booking
     CreateBooking-->>Client: Booking confirmed/declined
 ```
 
-**From Official Documentation**:
-> "Calculate the total number of participants already booked by adding up the `attendance.numberOfAttendees` from all extended bookings. Then, subtract this total from the service's `defaultCapacity` to determine the number of remaining spots."
-
-**Issues with Current External Client Flow**:
-
-| Issue | Description | Impact |
-|-------|-------------|--------|
-| **No availability API** | Must query bookings and calculate manually | High complexity for integrators |
-| **No policy enforcement** | `tooEarlyToBook`, `tooLateToBook`, `bookAfterStartPolicy` not provided | Client must implement or skip |
-| **Race conditions** | Between query and booking, spots may be taken | Potential overbooking attempts |
-| **No session details** | Only aggregate capacity, no per-session info | Poor UX for displaying sessions |
-| **Documentation outdated** | Recommends deprecated APIs, no modern alternative | Developer confusion |
-
-> ⚠️ **ACTION ITEM**: Update official documentation to reflect new course availability endpoint once implemented.
-
-### 4.3 Bookings Service Availability Validation
-
-When `createBooking` is called, the Bookings service validates availability differently per service type:
+### Current Bookings Service Availability Validation
 
 ```mermaid
 flowchart TD
-    CB[createBooking Request] --> TYPE{Service Type?}
+    subgraph "Bookings Service"
+        CB[createBooking] --> VA[validateAvailability]
+        VA --> TYPE{bookedEntity.item type?}
+        
+        TYPE -->|Item.Slot with sessionId| CLASS[getSlotAvailabilityForClass]
+        TYPE -->|Item.Slot without sessionId| APPT[getSlotAvailabilityForAppointment]
+        TYPE -->|Item.Schedule| COURSE[getScheduleAvailability]
+    end
     
-    TYPE -->|Appointment| APPT[getSlotAvailability<br/>via AvailabilityCalendar]
-    TYPE -->|Class| CLASS_CHECK{Feature Toggle?}
-    TYPE -->|Course| COURSE[getScheduleAvailability<br/>via AvailabilityCalendar]
+    subgraph "AvailabilityCalendar (DEPRECATED)"
+        CLASS --> AC_CLASS[getSlotAvailability]
+        COURSE --> AC_COURSE[getScheduleAvailability]
+        
+        AC_CLASS --> TOGGLE{Feature Toggle?}
+        TOGGLE -->|Enabled| PROXY[Proxy to EventTimeSlots]
+        TOGGLE -->|Disabled| LEGACY[Legacy calculation]
+    end
     
-    CLASS_CHECK -->|EventTimeSlots enabled| CLASS_NEW[getEventTimeSlot<br/>via EventTimeSlots]
-    CLASS_CHECK -->|Legacy| CLASS_OLD[getSlotAvailability<br/>via AvailabilityCalendar]
+    subgraph "service-availability"
+        PROXY --> ETS[EventTimeSlots.getEventTimeSlot]
+    end
     
-    APPT --> VALIDATE[Validate Availability]
-    CLASS_NEW --> VALIDATE
-    CLASS_OLD --> VALIDATE
-    COURSE --> VALIDATE
-    
-    VALIDATE --> RESULT{Available?}
-    RESULT -->|Yes| CONFIRM[Confirm Booking]
-    RESULT -->|No| DECLINE[Decline Booking]
-    
-    style COURSE fill:#FFB6C1
-    style CLASS_OLD fill:#FFB6C1
-    style APPT fill:#FFB6C1
+    style AC_CLASS fill:#FFB6C1
+    style AC_COURSE fill:#FFB6C1
 ```
 
-**Current State**:
-- Classes: Can use `EventTimeSlots` via feature toggle (migration in progress)
-- Courses: No alternative - must use deprecated `AvailabilityCalendar.getScheduleAvailability`
-- Appointments: Still uses deprecated `AvailabilityCalendar`
+### Issues with Current Architecture
 
-**Question**: Will Bookings service use the new course availability endpoint for validation, same as it uses `ListEventTimeSlots` for classes?
+| Issue | Description | Impact |
+|-------|-------------|--------|
+| **Client-Side Calculation** | Clients must implement availability logic themselves | Inconsistent implementations, error-prone |
+| **Multiple API Calls** | Requires 3+ sequential API calls | Higher latency, poor performance |
+| **No Policy Enforcement** | Clients don't receive `bookingPolicyViolations` | Must implement policies themselves or skip |
+| **Deprecated API Dependency** | Uses deprecated Schedule V1 and AvailabilityCalendar | Migration blocker |
+| **No Session Details** | Only aggregate capacity, no per-session info | Poor UX for displaying sessions |
 
-> **Recommendation**: Yes, with feature toggle for gradual rollout and fallback to current implementation.
+### Current createBooking Availability Validation Per Service Type
 
-### 4.4 Comparison: Classes vs Courses (Current State)
+When `createBooking` is called, the Bookings service validates availability differently per service type:
 
-| Aspect | Classes | Courses |
-|--------|---------|---------|
-| **Display Availability API** | ✅ `ListEventTimeSlots` | ❌ None (client calculates) |
-| **Booking Validation API** | `EventTimeSlots` OR `AvailabilityCalendar` | `AvailabilityCalendar` only |
-| **Availability Calculation** | Server-side | Client-side |
-| **Policy Enforcement** | ✅ Server-side | ❌ Client responsibility |
-| **Session-Level Details** | ✅ Per-session capacity | ❌ Aggregate only |
-| **API Calls for Display** | 1 call | 3+ calls |
-| **Deprecated API Dependency** | Optional (toggle) | Required |
+| Service Type | Availability Source | Consistency | Capacity Data |
+|--------------|---------------------|-------------|---------------|
+| **Appointments** | `AvailabilityCalendar.getSlotAvailability` | Consistent | Checks resource conflicts, slot generation |
+| **Classes** (toggle ON) | `EventTimeSlots.getEventTimeSlot` via proxy | **Eventually Consistent** | Uses `Event.remainingCapacity` |
+| **Classes** (toggle OFF) | `AvailabilityCalendar.getSlotAvailability` | Consistent | Queries Bookings directly |
+| **Courses** | `AvailabilityCalendar.getScheduleAvailability` | Consistent | Sums confirmed bookings by scheduleId |
+
+**Key Insight**: When the feature toggle `conductSpecsAvailabilitycalendarProxyClassServicesToEventTimeSlotsSpec` is ON, class booking validation uses the same eventually consistent data as the display endpoint (`ListEventTimeSlots`).
+
+**Edge Case - Class Availability with Toggle ON**:
+
+```mermaid
+flowchart TD
+    subgraph "Class createBooking Flow (Toggle ON)"
+        CB[createBooking] --> GSA[getSlotAvailability]
+        GSA --> PROXY[AvailabilityV2Proxy.listEventTimeSlotsProxy]
+        PROXY --> ETS[EventTimeSlots.getEventTimeSlot]
+        ETS --> DATA[Event.remainingCapacity<br/>Eventually Consistent!]
+        
+        DATA --> VAL{remainingCapacity >= numberOfParticipants?}
+        VAL -->|Yes| PASS[Proceed with booking]
+        VAL -->|No| FAIL[SessionCapacityExceededException]
+    end
+    
+    style DATA fill:#FFFACD
+```
+
+**Why this is acceptable**:
+1. Event updates happen shortly after booking creation (exact latency TBD - needs measurement)
+2. Race conditions are rare (requires two bookings for last spot within a small window)
+3. Policy violations (tooLate, tooEarly, etc.) still block invalid bookings
+4. For high-contention scenarios, eventual consistency is a deliberate trade-off for performance
 
 ---
 
-## 5. Proposed Solution: New Course Availability Endpoint
+## 📘 Planned Design Description
 
-### 5.1 Solution Overview
+### Elevator Pitch
 
-Create a new dedicated endpoint `ListCourseEventTimeSlots` in the `service-availability` module, following the same pattern as existing endpoints.
+Create a new `ListCourseEventTimeSlots` endpoint that returns course session availability with server-side policy calculation, using `ScheduleTimeFrames V3` for policy reference time and `Event.remainingCapacity` for capacity - enabling clients to get complete availability in a single API call.
 
-```mermaid
-flowchart LR
-    subgraph "service-availability Module"
-        ATS[AvailabilityTimeSlots<br/>Appointments]
-        ETS[EventTimeSlots<br/>Classes]
-        MSTS[MultiServiceAvailabilityTimeSlots<br/>Multi-Service]
-        CETS[CourseEventTimeSlots<br/>Courses - NEW]
-    end
-    
-    style CETS fill:#90EE90
-```
-
-### 5.2 New Endpoint Data Flow
+### New Endpoint Data Flow
 
 ```mermaid
 sequenceDiagram
@@ -438,17 +492,20 @@ sequenceDiagram
     participant CourseTimeSlots as CourseEventTimeSlots (NEW)
     participant Services as Services V2
     participant Events as Events V3
+    participant TimeFrames as ScheduleTimeFrames V3
     participant PolicySPI as BookingPolicyProvider SPI
     
     Client->>CourseTimeSlots: ListCourseEventTimeSlots(serviceIds, dateRange)
     
     par Parallel Data Fetching
-        CourseTimeSlots->>Services: Query Services (get schedule metadata)
+        CourseTimeSlots->>Services: Query Services (get scheduleIds, service type)
         CourseTimeSlots->>Events: Query Events (by scheduleIds, dateRange)
+        CourseTimeSlots->>TimeFrames: Get TimeFrames (firstEventStartDate, lastEventEndDate)
         CourseTimeSlots->>PolicySPI: List Booking Policies (by serviceIds)
     end
     
-    Services-->>CourseTimeSlots: Service with schedule.firstSessionStart
+    Services-->>CourseTimeSlots: Service metadata, scheduleIds
+    TimeFrames-->>CourseTimeSlots: firstEventStartDate, lastEventEndDate
     Events-->>CourseTimeSlots: Course session events with remainingCapacity
     PolicySPI-->>CourseTimeSlots: Booking policies
     
@@ -457,25 +514,250 @@ sequenceDiagram
     CourseTimeSlots-->>Client: TimeSlots with bookable, remainingCapacity, policyViolations
 ```
 
-### 5.3 Parallel vs Sequential Data Fetching
-
-**Current Flow (Client-Side)**: Sequential - 3 calls one after another
-
-**New Flow (Server-Side)**: Parallel where possible
+### Parallel vs Sequential Data Fetching
 
 | Data Source | Can Parallelize? | Depends On |
 |-------------|------------------|------------|
 | Query Services | ✅ Yes | Request only |
 | Query Events | ✅ Yes | Request only |
+| Query ScheduleTimeFrames | ✅ Yes | Request only (uses scheduleIds) |
 | Query Booking Policies | ✅ Yes | Request only (uses serviceIds) |
-| Calculate Policy Violations | ❌ No | Requires Services (firstSessionStart) + Policies |
+| Calculate Policy Violations | ❌ No | Requires TimeFrames (firstEventStartDate) + Policies |
 | Calculate Capacity | ❌ No | Requires Events (remainingCapacity) |
 
 **Performance Benefit**:
-- Current: 3 sequential calls = Sum of all latencies
-- New: 3 parallel calls = Max of all latencies
+- Current (Client): 3 sequential calls = Sum of all latencies
+- New (Server): 4 parallel calls = Max of all latencies
 
-### 5.4 Request/Response Model
+### How Bookings Service Will Use New Endpoint
+
+**No changes required to Bookings service code**. The integration happens at the `AvailabilityCalendar` layer:
+
+```mermaid
+sequenceDiagram
+    participant Bookings as Bookings Service
+    participant AC as AvailabilityCalendar
+    participant NewEP as CourseEventTimeSlots (NEW)
+    participant Legacy as Legacy getScheduleAvailability
+    
+    Bookings->>AC: getScheduleAvailability(scheduleId)
+    
+    alt Feature Toggle ENABLED
+        AC->>NewEP: getCourseEventTimeSlot(scheduleId)
+        NewEP-->>AC: CourseTimeSlot (bookable, remainingCapacity, policyViolations)
+        AC-->>Bookings: GetScheduleAvailabilityResponse (mapped)
+    else Feature Toggle DISABLED (fallback)
+        AC->>Legacy: Legacy calculation (Schedule V1, Bookings query)
+        Legacy-->>AC: ScheduleAvailability
+        AC-->>Bookings: GetScheduleAvailabilityResponse
+    end
+```
+
+---
+
+## 📘 Target Design Blueprint
+
+### Data Sources
+
+| Data | Recommended Source | Rationale |
+|------|-------------------|-----------|
+| Session Events | Events V3 | Direct access, includes capacity |
+| Remaining Capacity | Event.remainingCapacity | Fast, eventually consistent (acceptable for display) |
+| Policy Reference Time | **ScheduleTimeFrames V3** (`firstEventStartDate`) | Non-deprecated, correct course semantics |
+| Booking Policies | BookingPolicyProvider SPI | Standard pattern, extensible |
+
+> ⚠️ **Deprecated Sources to Avoid**:
+> - `Schedule V1` - fully deprecated
+> - `Services V2.schedule.firstSessionStart` - populated from deprecated Schedule V1
+
+### Course vs Class Policy Calculation
+
+| Policy | Classes | Courses |
+|--------|---------|---------|
+| **Reference Time** | `event.start` | `ScheduleTimeFrames.firstEventStartDate` |
+| **tooLateToBook** | `now > event.start - limitLateBookingMinutes` | `now > firstEventStartDate - limitLateBookingMinutes` |
+| **tooEarlyToBook** | `now < event.start - limitEarlyBookingMinutes` | `now < firstEventStartDate - limitEarlyBookingMinutes` |
+| **bookAfterStartPolicy** | N/A (past events are unbookable) | If `now > firstEventStartDate`, check `bookAfterStartPolicy.enabled` |
+| **Unified bookable** | Per-event decision | Same for all events in course |
+| **remainingCapacity** | Per-event | Per-event (from Event.remainingCapacity) |
+
+### Consistency Trade-off: Legacy vs New
+
+| Aspect | Current (AvailabilityCalendar) | New (CourseEventTimeSlots) |
+|--------|-------------------------------|---------------------------|
+| **Data Source for Capacity** | Query Bookings (consistent) | Event.remainingCapacity (eventual) |
+| **Policy Reference Time** | Schedule V1.firstSessionStart | ScheduleTimeFrames V3.firstEventStartDate |
+| **Dependencies** | Schedule V1, Bookings, Services | Events V3, ScheduleTimeFrames V3, Services V2 |
+| **Performance** | Slower (Bookings query) | Faster (no extra query) |
+| **Consistency** | Consistent | Eventually consistent |
+| **Used for** | Booking validation only | **Both display AND validation** |
+
+> **Key Decision**: We accept eventual consistency for BOTH display and validation because:
+> 1. Policy checks remain consistent (time-based calculations)
+> 2. Capacity race conditions are rare and operationally manageable
+> 3. Performance gain outweighs the small risk
+> 4. Same pattern proven successful with `ListEventTimeSlots` for classes
+
+### Policy vs Capacity Consistency Analysis
+
+**Policy calculations are ALWAYS consistent** because they only use:
+- Timestamps (`now()` vs `event.start` or `schedule.firstEventStartDate`)
+- Service configuration (`Service.bookingPolicy`) - read fresh from Services V2 on each request
+
+**Only capacity calculation is eventually consistent** - depends on `Event.remainingCapacity` being updated.
+
+| Calculation | Data Used | Consistent? |
+|-------------|-----------|-------------|
+| `tooEarlyToBook` | `now()`, `firstEventStartDate`, `limitEarlyBookingMinutes` | ✅ Yes |
+| `tooLateToBook` | `now()`, `firstEventStartDate`, `limitLateBookingMinutes` | ✅ Yes |
+| `bookOnlineDisabled` | `Service.bookingPolicy.bookOnlineDisabled` | ✅ Yes |
+| `bookAfterStartPolicy` | `now()`, `firstEventStartDate`, `bookAfterStartPolicy.enabled` | ✅ Yes |
+| `remainingCapacity` | `Event.remainingCapacity` | ⚠️ Eventually consistent |
+
+### Event Update Pipeline (Eventual Consistency Flow)
+
+When a booking is created, the following async pipeline updates `Event.remainingCapacity`:
+
+```mermaid
+sequenceDiagram
+    participant BS as Bookings Service
+    participant SDL as Bookings SDL
+    participant DE as Domain Events
+    participant BSH as BookingsSchedulesHandler
+    participant PS as ParticipationsService
+    participant ATQ as AsyncTaskQueue
+    participant EU as EventUpdater
+    participant ES as Events V3
+    
+    BS->>SDL: Insert Booking (status: CONFIRMED or PENDING)
+    SDL-->>DE: Emit Booking.Created domain event
+    
+    Note over DE,BSH: Async - Kafka message
+    DE->>BSH: Booking.Created/BookingChanged
+    
+    alt Item.Schedule (Course)
+        BSH->>PS: createParticipation(scheduleId, partySize)
+    else Item.Slot (Class/Appointment)
+        BSH->>PS: createParticipation(eventId, partySize)
+    end
+    
+    PS-->>DE: Emit Participation.Created domain event
+    
+    Note over DE,PS: Self-domain event handling
+    DE->>PS: handleSelfDomainEvent(Participation.Created)
+    PS->>ATQ: enqueueTask(HandleEventParticipation or HandleScheduleParticipation)
+    
+    Note over ATQ,EU: Async task processing
+    ATQ->>EU: TaskHandler.handle()
+    EU->>EU: ParticipantsAggregator.aggregateParticipants()
+    EU->>ES: updateEventParticipants(eventId, participants)
+    
+    Note over ES: remainingCapacity = totalCapacity - participants.total
+    ES->>ES: Save updated Event
+```
+
+**Key Points**:
+1. **Trigger**: Both `CONFIRMED` and `PENDING` booking statuses trigger participation creation
+2. **Async nature**: The pipeline is fully asynchronous via domain events and task queues
+3. **Latency**: Depends on Kafka consumer lag and task queue processing (no measured SLA - needs monitoring data)
+4. **No capacity validation in Participations**: The platform does NOT reject participation if event is at capacity - it simply updates `remainingCapacity` (can become negative)
+
+> ⚠️ **TODO**: Measure actual p50/p99 latency from `Booking.Created` to `Event.remainingCapacity` update using production metrics.
+
+### Overbooking Edge Case
+
+**Q: What happens if two concurrent bookings race for the last spot?**
+
+```mermaid
+flowchart TD
+    subgraph "Race Condition Scenario"
+        B1[Booking 1: Check availability] --> A1[Event has 1 spot]
+        B2[Booking 2: Check availability] --> A2[Event has 1 spot]
+        
+        A1 --> C1[Booking 1: Create booking]
+        A2 --> C2[Booking 2: Create booking]
+        
+        C1 --> P1[Participation created for Booking 1]
+        C2 --> P2[Participation created for Booking 2]
+        
+        P1 --> E1[Event updated: remainingCapacity = 0]
+        P2 --> E2[Event updated: remainingCapacity = -1]
+    end
+    
+    style E2 fill:#FFB6C1
+```
+
+**Answer**: The platform allows this - both bookings succeed because:
+1. Availability check (`validateSlotAvailability`) happens BEFORE booking SDL insert
+2. If both requests pass the check before either updates the event, both proceed
+3. `Event.remainingCapacity` can become negative (no hard constraint)
+4. This is an **intentional design choice**: performance and simplicity over strict consistency
+
+**Business Mitigation**:
+- This race window is very small (milliseconds)
+- Overbooking can be handled operationally (refund, reschedule)
+- For high-demand scenarios, consider adding a rate limiter or semaphore (out of scope)
+
+### Why Eventual Consistency is Acceptable
+
+| Factor | Justification |
+|--------|---------------|
+| **Small window** | Async pipeline assumed to complete quickly (latency TBD - needs measurement) |
+| **Low collision probability** | Most bookings don't race for last spot |
+| **Policy still blocks** | If course is `tooLateToBook`, capacity doesn't matter |
+| **Operational handling** | Business can handle rare overbookings |
+| **Performance gain** | Avoiding consistent Bookings query significantly improves latency |
+| **Alignment with classes** | Same pattern used for class availability (proven) |
+
+---
+
+## 📘 Alternative Solutions / Design Dilemmas
+
+### Dilemma 1: New Endpoint vs Extend ListEventTimeSlots
+
+**Option A: Extend `ListEventTimeSlots`**
+- Add course support to existing class availability endpoint
+- Unified API for all event-based services (classes + courses)
+
+**Option B: Create New `ListCourseEventTimeSlots` Endpoint** ✅ **RECOMMENDED**
+- Dedicated endpoint for course availability
+- Follows existing pattern of separate endpoints per service type
+
+| Reason | Explanation |
+|--------|-------------|
+| **Follows existing pattern** | `service-availability` already has 3 separate endpoints (appointments, classes, multi-service). Adding a 4th for courses is consistent. |
+| **Code clarity** | Avoids complex type-checking logic to differentiate course vs class. Each endpoint has clear responsibility. |
+| **Safe rollout** | New functionality is completely isolated from existing endpoints. Zero risk of breaking class availability. |
+| **Tailored optimization** | Course-specific optimizations (e.g., schedule-level policy calculation) without affecting classes. |
+| **Future flexibility** | Course-specific features (e.g., course waitlist) can be added without impacting other endpoints. |
+
+### Dilemma 2: Capacity Data Source
+
+| Option | Source | Pros | Cons |
+|--------|--------|------|------|
+| **A: Event.remainingCapacity** ✅ | Events V3 | Fast, no extra call, unified with classes | Eventually consistent |
+| **B: Query Participations** | Participations V3 | Consistent | Slower (extra RPC) |
+| **C: Query Bookings** | Bookings V2 | Consistent | Slower (extra RPC) |
+
+**Recommendation**: Option A - aligns with class availability pattern, acceptable for display
+
+### Dilemma 3: Policy Reference Time
+
+| Option | Source | Deprecated? |
+|--------|--------|-------------|
+| **A: Schedule V1.firstSessionStart** | Schedule V1 | ⚠️ **Deprecated** |
+| **B: ScheduleTimeFrames V3** ✅ | `firstEventStartDate` | ✅ No |
+| **C: Query first event directly** | Events V3 | ✅ No (extra call) |
+
+**Recommendation**: Option B - non-deprecated, already used internally
+
+---
+
+## 📘 APIs
+
+### New Endpoint: ListCourseEventTimeSlots
+
+**Endpoint**: `POST /bookings/availability/v2/course-event-time-slots`
 
 **Request Parameters**:
 
@@ -484,8 +766,8 @@ sequenceDiagram
 | `service_ids` | Optional | Filter by course service IDs (max 100) |
 | `from_local_date` | Required | Start of date range (ISO 8601) |
 | `to_local_date` | Required | End of date range (ISO 8601) |
-| `time_zone` | Optional | Timezone for date interpretation (default: business timezone) |
-| `include_non_bookable` | Optional | Include non-bookable time slots (default: true) |
+| `time_zone` | Optional | Timezone (default: business timezone) |
+| `include_non_bookable` | Optional | Include non-bookable slots (default: true) |
 | `cursor_paging` | Optional | Cursor-based pagination |
 
 **Response Fields** (per TimeSlot):
@@ -501,275 +783,162 @@ sequenceDiagram
 | `remaining_capacity` | Spots remaining for this session |
 | `total_capacity` | Total capacity for this session |
 | `booking_policy_violations` | Policy violations (tooEarly, tooLate, etc.) |
-| `location` | Session location |
+
+### SPI Extension Required
+
+**BookingPolicyProvider SPI** needs extension to include `bookAfterStartPolicy`:
+
+| Current Fields | New Field Required |
+|----------------|-------------------|
+| `limit_early_booking_minutes` | `book_after_start_policy.enabled` |
+| `limit_late_booking_minutes` | |
+| `book_online_disabled` | |
+| `max_participants_per_booking` | |
 
 ---
 
-## 6. Data Sources Analysis
+## ✅ Wix Ecosystem Requirements
 
-For each data requirement, we analyze the options and recommend an approach.
+### ✅ Experiments & Feature Toggles
 
-### 6.1 Event Data (Sessions)
+| Toggle | Description | Default | Rollout |
+|--------|-------------|---------|---------|
+| `course_availability_enabled` | Enable new CourseEventTimeSlots endpoint | false | 1% → 10% → 50% → 100% |
+| `proxy_course_to_new_endpoint` | AvailabilityCalendar proxies to new endpoint | false | After endpoint stable |
 
-**Requirement**: Get course session events with timing and capacity information.
+### ✅ PII
 
-| Option | Source | Pros | Cons |
-|--------|--------|------|------|
-| **A: Events V3 Query** | `EventsService.queryEvents` | Direct access, supports filtering, includes remainingCapacity | Requires scheduleId filter |
-| **B: Via Schedule TimeFrames** | `ScheduleTimeFramesService` | Cached, fast | Only provides first/last dates, not all events |
+**Not Applicable** - Course availability contains no PII (only aggregated capacity numbers, no participant names/details).
 
-**Recommendation**: **Option A - Events V3 Query**
-- Provides all session events with per-event `remainingCapacity`
-- Supports date range filtering
-- Already used by `ListEventTimeSlots` for classes
+### ✅ GDPR
 
-### 6.2 Capacity Data (Remaining Spots)
+**Not Applicable** - No personal data stored or processed. Availability queries are anonymous.
 
-**Requirement**: Determine how many spots are available.
+### ✅ BI
 
-| Option | Source | Consistency | Performance |
-|--------|--------|-------------|-------------|
-| **A: Event.remainingCapacity** | Events V3 | Eventually consistent (1-5s lag) | Fast (no extra call) |
-| **B: Query Participations** | Participations V3 | Consistent | Slower (extra RPC) |
-| **C: Query Bookings** | Bookings V2 | Consistent | Slower (extra RPC) |
+**BI Events**:
+1. `course_availability_query` - Track query usage, latency, cache hits
+2. `course_policy_violation` - Track policy violation types
+3. `course_availability_error` - Track errors and dependency issues
 
-**Recommendation**: **Option A - Event.remainingCapacity**
-- Same approach as classes in `ListEventTimeSlots`
-- Platform guarantees events are updated when participations change
-- Acceptable for display purposes (Events Availability domain)
-- `createBooking` validation catches race conditions
+### ✅ Accessibility
 
-### 6.3 Policy Reference Time
+**Not Applicable** - Backend API only, no UI components. Frontend teams are responsible for accessibility compliance.
 
-**Requirement**: Determine the reference point for policy calculations (tooEarly, tooLate).
+### ✅ Audit
 
-| Option | Source | Semantics |
-|--------|--------|-----------|
-| **A: First event in query range** | Events V3 | May miss relevant events outside query window |
-| **B: schedule.firstSessionStart** | Services V2 | Correct for course semantics |
-| **C: Query first event separately** | Events V3 | Extra call, but accurate |
+**Minimal** - Read-only API. Course availability queries logged via BI events. No Activity Log required (non-mutating).
 
-**Recommendation**: **Option B - schedule.firstSessionStart from Services V2**
-- Matches current `AvailabilityCalendar` behavior
-- Correct semantics for course booking (policies relative to course start, not query window)
-- Available in single Services V2 call
+### ✅ Presence in Wix Platforms
 
-### 6.4 Booking Policies
+| Platform | Impact | Notes |
+|----------|--------|-------|
+| Editor | No impact | Uses Services V2 for configuration |
+| Editor Preview | May use new endpoint | Previewing availability |
+| Business Manager | May use new endpoint | Reporting |
+| OneApp | May use new endpoint | Mobile availability |
+| Branded Apps | May use new endpoint | Mobile availability |
+| POS | No impact | Doesn't show availability |
 
-**Requirement**: Get booking policy configuration for policy violation calculation.
+**Potential Breakage**: **NONE** - All changes are backward compatible
 
-| Option | Source | Notes |
-|--------|--------|-------|
-| **A: BookingPolicyProvider SPI** | services-2 default implementation | Standard pattern for service-availability |
-| **B: Direct Services V2 query** | Services V2 API | Bypasses SPI extensibility |
+### ✅ Translations
 
-**Recommendation**: **Option A - BookingPolicyProvider SPI**
-- Consistent with other service-availability endpoints
-- Supports third-party extensibility
-- **Note**: SPI needs extension to include `bookAfterStartPolicy` field
-
-### 6.5 Data Sources Summary
-
-| Data | Recommended Source | Rationale |
-|------|-------------------|-----------|
-| Session Events | Events V3 | Direct access, includes capacity |
-| Remaining Capacity | Event.remainingCapacity | Fast, eventually consistent (acceptable for display) |
-| Policy Reference Time | Services V2 schedule.firstSessionStart | Correct course semantics |
-| Booking Policies | BookingPolicyProvider SPI | Standard pattern, extensible |
-| Resources (optional) | Resources V2 | If needed for display |
+**Not Required** - API responses contain only timestamps (locale-agnostic), capacity numbers (numeric), and boolean flags (language-agnostic).
 
 ---
 
-## 7. Design Decision: New Endpoint vs Extending ListEventTimeSlots
+## ✅ Non Functional Requirements
 
-### 7.1 Options Considered
+### ✅ Rollout / Rollout Strategy
 
-**Option A: Extend `ListEventTimeSlots`**
-- Add course support to existing class availability endpoint
-- Unified API for all event-based services (classes + courses)
+| Phase | Duration | Rollout % | KPIs |
+|-------|----------|-----------|------|
+| Dark Launch | 1 week | 0% | Zero errors, latency baseline |
+| 1% Rollout | 3 days | 1% | Error rate < 0.1% |
+| 10% Rollout | 5 days | 10% | Response parity with legacy |
+| 50% Rollout | 1 week | 50% | Performance improvement confirmed |
+| 100% Rollout | Ongoing | 100% | Zero critical incidents |
 
-**Option B: Create New `ListCourseEventTimeSlots` Endpoint** ✅ **RECOMMENDED**
-- Dedicated endpoint for course availability
-- Follows existing pattern of separate endpoints per service type
+**Rollback Strategy**: Feature flag OFF reverts to previous behavior
 
-### 7.2 Recommendation: New Endpoint
+### ✅ Monitoring, Alerts and Troubleshooting
 
-We recommend **Option B: Create a new dedicated endpoint** for the following reasons:
+**Metrics**:
+- `availability.course_requests.total` (counter)
+- `availability.latency_ms` (histogram)
+- `availability.policy_violations.<type>` (counter)
+- `availability.dependency_errors` (counter)
 
-| Reason | Explanation |
-|--------|-------------|
-| **Follows existing pattern** | `service-availability` already has 3 separate endpoints: `AvailabilityTimeSlots` (appointments), `EventTimeSlots` (classes), `MultiServiceAvailabilityTimeSlots` (multi-service). Adding a 4th for courses is consistent. |
-| **Code clarity** | Avoids complex type-checking logic to differentiate course vs class within single codebase. Each endpoint has clear responsibility. |
-| **Safe rollout** | New functionality is completely isolated from existing endpoints. Zero risk of breaking class availability during course rollout. |
-| **Tailored optimization** | Course-specific optimizations (e.g., schedule-level policy calculation, unified bookable status) can be implemented without affecting classes. |
-| **Future flexibility** | Course-specific features (e.g., course waitlist, partial enrollment) can be added without impacting other endpoints. |
-| **Easier debugging** | Issues in course availability don't require investigating class availability code paths. |
+**Alerts**:
 
-### 7.3 Comparison Matrix
+| Alert | Condition | Severity | Action |
+|-------|-----------|----------|--------|
+| High Error Rate | > 1% for 5 min | 🚨 Critical | Page on-call, rollback |
+| Dependency Failure | ScheduleTimeFrames down | ⚠️ Warning | Check dependency health |
 
-| Criterion | Extend ListEventTimeSlots | New Endpoint |
-|-----------|--------------------------|--------------|
-| Code complexity | ⚠️ Higher (type checks) | ✅ Lower (clean separation) |
-| Rollout risk | ⚠️ Could break classes | ✅ Isolated |
-| Pattern consistency | ❌ Breaks 1-endpoint-per-type | ✅ Follows existing pattern |
-| Future extensibility | ⚠️ Harder to add course-specific features | ✅ Easy |
-| Client migration | ✅ Same API | ⚠️ New API to call |
-| Maintenance | ⚠️ Mixed responsibilities | ✅ Clear ownership |
+**Urgent Channel**: `#bookings-platform-alerts`
 
-### 7.4 Architectural Alignment
+### ✅ Performance & Scale
 
-```mermaid
-flowchart TB
-    subgraph "service-availability Module"
-        direction LR
-        subgraph "Existing Endpoints"
-            ATS[AvailabilityTimeSlots<br/>Appointments]
-            ETS[EventTimeSlots<br/>Classes]
-            MSTS[MultiServiceAvailabilityTimeSlots<br/>Multi-Service]
-        end
-        
-        subgraph "New Endpoint"
-            CETS[CourseEventTimeSlots<br/>Courses]
-        end
-        
-        subgraph "Shared Infrastructure"
-            SPI[BookingPolicyProvider SPI]
-            EVENTS[Events V3 Client]
-            SERVICES[Services V2 Client]
-        end
-    end
-    
-    ATS --> SPI
-    ETS --> SPI
-    MSTS --> SPI
-    CETS --> SPI
-    
-    ATS --> SERVICES
-    ETS --> EVENTS
-    MSTS --> EVENTS
-    CETS --> EVENTS
-    CETS --> SERVICES
-    
-    style CETS fill:#90EE90
-```
+**Expected Capacity**:
 
----
+| Metric | Year 1 | Year 3 |
+|--------|--------|--------|
+| Course Availability Queries | 10M/year | 50M/year |
+| Peak RPM | ~500 | ~2000 |
 
-## 8. Implementation & Rollout Plan
+**Performance Impact**:
+- 4 parallel calls vs 3 sequential = Net performance improvement
+- No extra Bookings query = Reduced dependency load
 
-### 8.1 Implementation Phases
+### ✅ High Availability & Durability
 
-```mermaid
-gantt
-    title Course Availability Implementation Timeline
-    dateFormat  YYYY-MM-DD
-    section Phase 1
-    Implement New Endpoint           :p1, 2026-02-01, 2w
-    section Phase 2
-    Rollout New Endpoint             :p2, after p1, 2w
-    section Phase 3
-    Client Migration                 :p3, after p2, 4w
-    section Phase 4
-    Bookings Service Migration       :p4, after p3, 3w
-    section Phase 5
-    Remove Legacy Implementation     :p5, after p4, 2w
-    section Phase 6
-    Deprecate Schedule V1            :p6, after p5, 4w
-```
+**Availability SLA**: 99.9% (inherits service-availability SLA)
 
-### Phase 1: Implement New Endpoint
+**Dependency Availability**:
 
-**Duration**: 2 weeks
+| Dependency | Impact if Down | Mitigation |
+|-----------|----------------|------------|
+| ScheduleTimeFrames V3 | Policy calculation fails | Fallback to query first event |
+| Events V3 | All queries fail | Retry with exponential backoff |
+| Services V2 | Course detection fails | Return error |
 
-**Deliverables**:
-- `ListCourseEventTimeSlots` endpoint implementation
-- `GetCourseEventTimeSlot` endpoint implementation (single slot)
-- BookingPolicyProvider SPI extension (add `bookAfterStartPolicy`)
-- Unit tests (>90% coverage)
-- Integration tests
+### ✅ Error Handling & Resilience
 
-**Key Components**:
-- CourseEventTimeSlots service class
-- CoursePolicyViolationsCalculator (schedule-level policy calculation)
+**Graceful Degradation**:
+- ScheduleTimeFrames V3 down → Fallback to query first event from Events V3
+- Events V3 down → Fail request (no fallback data source)
+- SPI missing `bookAfterStartPolicy` → Treat as disabled (safe default)
+
+**Feature Killer**: Toggle `course_availability_enabled` to OFF
+
+### ✅ Security Vulnerability
+
+**Authentication**: Wix OAuth 2.0 (existing pattern)
+**Authorization**: Provider read permission required
+**STRIDE Analysis**: Low risk - read-only API, no PII, public availability data
+
+### ✅ Testing
+
+**Unit Tests** (>90% coverage):
 - Course detection logic
-- Response mapping
+- Policy calculation (all policies including `bookAfterStartPolicy`)
+- Schedule-level vs event-level policy calculation
 
-### Phase 2: Rollout New Endpoint
+**Integration Tests**:
+- End-to-end course availability query
+- Policy enforcement verification
+- Backward compatibility with AvailabilityCalendar proxy
 
-**Duration**: 2 weeks
-
-**Activities**:
-- Deploy with feature flag (default: OFF)
-- Gradual rollout: 1% → 10% → 50% → 100%
-- Monitor latency, error rates, cache hit rates
-- Validate against current AvailabilityCalendar responses
-
-**Success Criteria**:
-- Error rate < 0.1%
-- Latency comparable to or better than current implementation
-- Response parity with AvailabilityCalendar (validated via shadow traffic)
-
-### Phase 3: Client Migration
-
-**Duration**: 4 weeks
-
-**Activities**:
-- Update Bookings Widget to use new endpoint
-- Update external documentation with new recommended flow
-- Communicate to third-party integrators
-- Provide migration guide
-
-**Milestones**:
-- Internal clients (Bookings Widget) migrated
-- Documentation updated
-- Migration guide published
-
-> ⚠️ **ACTION ITEM**: Update [official documentation](https://dev.wix.com/docs/api-reference/business-solutions/bookings/end-to-end-booking-flows#book-a-course) to reflect new endpoint.
-
-### Phase 4: Bookings Service Migration
-
-**Duration**: 3 weeks
-
-**Activities**:
-- Add feature toggle for course availability validation
-- Implement fallback to AvailabilityCalendar if new endpoint fails
-- Gradual rollout: 1% → 10% → 50% → 100%
-- Monitor booking success rates
-
-**Key Consideration**: Bookings service will use new endpoint for course availability validation, same pattern as `ListEventTimeSlots` for classes.
-
-### Phase 5: Remove Legacy Implementation
-
-**Duration**: 2 weeks
-
-**Activities**:
-- Remove deprecated code paths in AvailabilityCalendar
-- Remove feature toggles (new path becomes default)
-- Archive legacy tests
-
-**Prerequisites**:
-- All clients migrated
-- Zero traffic to deprecated endpoints
-- Monitoring confirms stability
-
-### Phase 6: Full Deprecation
-
-**Duration**: 4 weeks
-
-**Activities**:
-- Mark Schedule V1 as fully deprecated
-- Mark AvailabilityCalendar.getScheduleAvailability as removed
-- Update all documentation
-- Communicate deprecation completion
-
-**Final State**:
-- Schedule V1: Fully deprecated
-- AvailabilityCalendar: Fully deprecated
-- All course availability: Via new endpoint
+**Edge Cases**:
+- Course with `bookAfterStartPolicy = true` and first session in past
+- Course fully booked
+- Query range that excludes first session
 
 ---
 
-## 9. Open Questions
+## Open Questions
 
 ### Technical Questions
 
@@ -793,8 +962,93 @@ gantt
 | Dependency | Description | Owner | Status |
 |------------|-------------|-------|--------|
 | BookingPolicyProvider SPI | Add `bookAfterStartPolicy` field | service-availability team | Not started |
-| Services V2 | Ensure schedule.firstSessionStart available | services team | Available |
-| Events V3 | Ensure remainingCapacity available for courses | calendar team | Available |
+| ScheduleTimeFrames V3 | `firstEventStartDate`, `lastEventEndDate` | calendar team | ✅ Available |
+| Services V2 | Service type, scheduleId mapping | services team | ✅ Available |
+| Events V3 | Session events with `remainingCapacity` | calendar team | ✅ Available |
+
+---
+
+## Meeting Summaries and Decisions
+
+### Meeting 1: Design Kickoff
+**Date**: [TBD]  
+**Participants**: [TBD]
+
+**Decisions**:
+- [ ] Approve new endpoint approach (vs extending ListEventTimeSlots)
+- [ ] Confirm SPI extension acceptable
+- [ ] Agree on rollout timeline
+
+**Action Items**:
+
+| Action | Owner | JIRA | Status |
+|--------|-------|------|--------|
+| Schedule architecture review | [TBD] | [TBD] | Pending |
+| Create implementation JIRAs | [TBD] | [TBD] | Pending |
+
+---
+
+## Execution Plan
+
+### Phase 1: Implement New Endpoint
+
+**Duration**: 2 weeks
+
+**Deliverables**:
+- [ ] `ListCourseEventTimeSlots` endpoint implementation
+- [ ] `GetCourseEventTimeSlot` endpoint implementation
+- [ ] BookingPolicyProvider SPI extension (`bookAfterStartPolicy`)
+- [ ] Unit tests (>90% coverage)
+- [ ] Integration tests
+
+### Phase 2: Rollout New Endpoint
+
+**Duration**: 2 weeks
+
+**Deliverables**:
+- [ ] Deploy with feature flag OFF
+- [ ] Gradual rollout: 1% → 10% → 50% → 100%
+- [ ] Validate response parity with AvailabilityCalendar
+
+### Phase 3: Client Migration
+
+**Duration**: 4 weeks
+
+**Deliverables**:
+- [ ] Update Bookings Widget to use new endpoint
+- [ ] Update external documentation
+- [ ] Publish migration guide
+
+### Phase 4: Bookings Service Migration
+
+**Duration**: 3 weeks
+
+**Deliverables**:
+- [ ] Add proxy toggle in AvailabilityCalendar
+- [ ] Implement fallback mechanism
+- [ ] Gradual rollout of proxy
+
+### Phase 5: Remove Legacy Implementation
+
+**Duration**: 2 weeks
+
+**Deliverables**:
+- [ ] Remove deprecated code paths
+- [ ] Archive legacy tests
+
+### Phase 6: Full Deprecation
+
+**Duration**: 4 weeks
+
+**Deliverables**:
+- [ ] Mark Schedule V1 as fully deprecated
+- [ ] Mark AvailabilityCalendar.getScheduleAvailability as removed
+- [ ] Update all documentation
+
+**Final State**:
+- Schedule V1: Fully deprecated
+- AvailabilityCalendar: Fully deprecated
+- All course availability: Via new endpoint
 
 ---
 
@@ -802,9 +1056,10 @@ gantt
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2.0 | Jan 2026 | Major restructure: Added availability domains context, current flow analysis, data sources analysis, new endpoint recommendation, detailed rollout plan |
+| 3.0 | Jan 2026 | Restructured to match standard design template, aligned sections |
+| 2.0 | Jan 2026 | Added availability domains, current flow analysis, data sources, rollout plan |
 | 1.0 | Jan 2026 | Initial draft |
 
 ---
 
-*Document Version: 2.0*
+*Document Version: 3.0*
