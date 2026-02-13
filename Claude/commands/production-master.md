@@ -284,11 +284,46 @@ Examples:
 
 **Trace files are NEVER passed to other agents.** They exist solely for the human operator to debug the pipeline.
 
-### STEP 0.3: Verify MCP Connection (HARD GATE)
-Test Jira MCP by calling `get-issues` with a simple query. If it fails:
-1. Tell user: "MCP is not connected. Please check MCP server configuration and reconnect."
-2. **STOP and WAIT.** Do not proceed without MCP.
-3. If still failing after user action: **STOP THE ENTIRE INVESTIGATION.**
+### STEP 0.3: Verify ALL MCP Connections (HARD GATE)
+
+**Check EVERY MCP server the pipeline depends on.** Run these checks in parallel using lightweight calls. Report results as a status table.
+
+**Required checks (ALL must pass):**
+
+| # | Category | Check Tool | Check Call |
+|---|----------|-----------|------------|
+| 1 | Jira | `mcp__mcp-s__jira__get-issues` | `get-issues(projectKey: "SCHED", maxResults: 1, fields: ["key"])` |
+| 2 | Grafana | `mcp__mcp-s__grafana-datasource__list_datasources` | `list_datasources()` |
+| 3 | Slack | `mcp__mcp-s__slack__slack_list_channels` | `slack_list_channels(limit: 1)` |
+| 4 | GitHub | `mcp__mcp-s__github__search_repositories` | `search_repositories(query: "scheduler org:wix-private", perPage: 1)` |
+| 5 | Feature Toggles | `mcp__mcp-s__gradual-feature-release__list-strategies` | `list-strategies()` |
+| 6 | Octocode | `mcp__octocode__octocode__githubSearchCode` | `githubSearchCode(queries: [{mainResearchGoal: "health check", researchGoal: "verify connection", reasoning: "MCP connection test", keywordsToSearch: ["bookings"], owner: "wix-private", repo: "scheduler", match: "path", limit: 1}])` |
+
+**Execution:**
+1. Use `ToolSearch("select:<tool_name>")` to load each tool first
+2. Call all 6 checks in parallel (independent calls)
+3. Collect results into a status table
+
+**Display status table to user:**
+```
+=== MCP Connection Status ===
+| # | Server        | Status | Response |
+|---|---------------|--------|----------|
+| 1 | Jira          | OK/FAIL | [brief] |
+| 2 | Grafana       | OK/FAIL | [brief] |
+| 3 | Slack         | OK/FAIL | [brief] |
+| 4 | GitHub        | OK/FAIL | [brief] |
+| 5 | Feature Toggles | OK/FAIL | [brief] |
+| 6 | Octocode      | OK/FAIL | [brief] |
+```
+
+**Decision logic:**
+- **All 6 OK** → Proceed to Step 0.4.
+- **Any FAIL** → Tell user EXACTLY which servers failed. Display: "MCP servers not connected: [list]. Please run `/mcp` to reconnect or check server configuration." **STOP and WAIT.** Do not proceed.
+- **If user reconnects and says to retry** → Re-run ALL checks (not just failed ones).
+- **If still failing after retry** → **STOP THE ENTIRE INVESTIGATION.** Do not attempt workarounds.
+
+**Note on Octocode:** Octocode runs on its own server (`mcp__octocode__`), NOT under `mcp-s`. If only Octocode fails, the investigation CAN proceed with degraded codebase analysis (local clone + GitHub MCP fallback). Report this degradation to the user but don't block.
 
 ### STEP 0.4: Fetch Jira Ticket
 Call Jira MCP `get-issues` with JQL `key = {TICKET_ID}`, fields: `key,summary,status,priority,reporter,assignee,description,comment,created,updated`.
@@ -835,7 +870,8 @@ Root cause: [one sentence from verifier TL;DR]
 ### MCP Reliability
 29. **MCP failure = HARD STOP for that operation.** Report the failure, try auth once, then stop if still failing.
 30. **Never fabricate data** when a tool fails.
-31. **Verify MCP at Step 0.3** before starting any full investigation.
+31. **Verify ALL 6 MCP servers at Step 0.3** before starting any full investigation. All must pass except Octocode (degraded mode allowed).
+31b. **MCP server map:** Jira/Slack/GitHub/Grafana/FT are on `mcp-s` server. Octocode is on its own `mcp__octocode__` server. Know which prefix to use for each.
 
 ### Ad-hoc Mode Rules
 32. **Ad-hoc modes (QUERY_LOGS, TRACE_REQUEST, etc.) execute directly** — no subagents needed, no output directory.

@@ -32,10 +32,23 @@
 
 ### MCP Tools
 - Sub-agents DO have access to ToolSearch and MCP tools — they can load and use them directly
-- Orchestrator checks MCP-s connection in Step 0.6 and authenticates if needed
+- Orchestrator checks ALL 6 MCP servers in Step 0.3 (hard gate) before starting
 - Agents use `ToolSearch("select:<exact_tool_name>")` — tool lists are in their `.md` files
-- Known tool name prefix: `mcp__mcp-s__`
-- Key tool categories: jira, grafana-datasource, slack, github, gradual-feature-release, devex, octocode
+
+### MCP Server Map
+| Server Prefix | Categories | Notes |
+|---|---|---|
+| `mcp__mcp-s__` | jira, slack, github, grafana-datasource, gradual-feature-release, context7 | Multi-tool server |
+| `mcp__octocode__` | octocode (githubSearchCode, githubGetFileContent, etc) | Separate server, NOT under mcp-s |
+| `mcp__Slack__` | slack (post_message, reply_to_thread, add_reaction) | Dedicated Slack with write access |
+| `mcp__grafana-mcp__` | grafana-mcp (dashboards, alerts, prometheus) | Grafana Cloud MCP |
+| `mcp__grafana-datasource__` | grafana-datasource (same as mcp-s) | Duplicate of mcp-s grafana tools |
+| `mcp__github__` | github (same as mcp-s) | Duplicate of mcp-s github tools |
+| `mcp__jira__` | jira (same as mcp-s) | Duplicate of mcp-s jira tools |
+| `mcp__FT-release__` | gradual-feature-release (same as mcp-s) | Duplicate of mcp-s FT tools |
+| `mcp__context-7__` | context7 (resolve-library-id, query-docs) | Duplicate of mcp-s context7 tools |
+
+**Key insight:** Most tools exist on both `mcp-s` AND dedicated servers. Pipeline uses `mcp-s` prefix by default. Octocode is the exception — only on `mcp__octocode__`.
 
 ### Output Directory
 - Location: `.claude/debug/` inside the repo root (or `./debug/` outside a repo)
