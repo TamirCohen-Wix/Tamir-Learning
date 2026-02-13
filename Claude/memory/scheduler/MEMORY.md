@@ -32,8 +32,9 @@
 
 ### MCP Tools
 - Sub-agents DO have access to ToolSearch and MCP tools — they can load and use them directly
-- Orchestrator checks ALL 6 MCP servers in Step 0.3 (hard gate) before starting
+- Orchestrator checks ALL 6 MCP servers in Step 0.3 (hard gate) — ALL must pass, no exceptions
 - Agents use `ToolSearch("select:<exact_tool_name>")` — tool lists are in their `.md` files
+- **Local fallback (e.g., `gh` CLI, local git) requires explicit user approval** and must be recorded in the agent's trace file
 
 ### MCP Server Map
 | Server Prefix | Categories | Notes |

@@ -321,9 +321,9 @@ Examples:
 - **All 6 OK** → Proceed to Step 0.4.
 - **Any FAIL** → Tell user EXACTLY which servers failed. Display: "MCP servers not connected: [list]. Please run `/mcp` to reconnect or check server configuration." **STOP and WAIT.** Do not proceed.
 - **If user reconnects and says to retry** → Re-run ALL checks (not just failed ones).
-- **If still failing after retry** → **STOP THE ENTIRE INVESTIGATION.** Do not attempt workarounds.
+- **If still failing after retry** → **STOP THE ENTIRE INVESTIGATION.** Do not attempt workarounds or local fallbacks without user approval (see rule 31c below).
 
-**Note on Octocode:** Octocode runs on its own server (`mcp__octocode__`), NOT under `mcp-s`. If only Octocode fails, the investigation CAN proceed with degraded codebase analysis (local clone + GitHub MCP fallback). Report this degradation to the user but don't block.
+**No exceptions.** All 6 servers must pass. Octocode is NOT optional — it provides features (semantic code search, cross-repo search) that GitHub MCP and local tools cannot replace.
 
 ### STEP 0.4: Fetch Jira Ticket
 Call Jira MCP `get-issues` with JQL `key = {TICKET_ID}`, fields: `key,summary,status,priority,reporter,assignee,description,comment,created,updated`.
@@ -870,8 +870,14 @@ Root cause: [one sentence from verifier TL;DR]
 ### MCP Reliability
 29. **MCP failure = HARD STOP for that operation.** Report the failure, try auth once, then stop if still failing.
 30. **Never fabricate data** when a tool fails.
-31. **Verify ALL 6 MCP servers at Step 0.3** before starting any full investigation. All must pass except Octocode (degraded mode allowed).
+31. **Verify ALL 6 MCP servers at Step 0.3** before starting any full investigation. ALL must pass — no exceptions.
 31b. **MCP server map:** Jira/Slack/GitHub/Grafana/FT are on `mcp-s` server. Octocode is on its own `mcp__octocode__` server. Know which prefix to use for each.
+31c. **Local fallback requires user approval.** If an MCP server fails mid-investigation (after Step 0.3 passed), do NOT silently fall back to local alternatives (e.g., `gh` CLI instead of GitHub MCP, local `git log` instead of GitHub commits, Glob/Grep instead of Octocode). Instead:
+    1. Report the failure to the user: "[MCP server] failed. Error: [error]"
+    2. Propose the local alternative: "I can use [local tool] instead, but it has these limitations: [list]"
+    3. **Wait for user approval** before proceeding with the fallback
+    4. If approved: **record the fallback in the agent's trace file** — which MCP failed, what local tool was used instead, and what limitations this introduces
+    5. The agent's output file must also note: "Data source: [local tool] (MCP fallback — [MCP name] was unavailable)"
 
 ### Ad-hoc Mode Rules
 32. **Ad-hoc modes (QUERY_LOGS, TRACE_REQUEST, etc.) execute directly** — no subagents needed, no output directory.
