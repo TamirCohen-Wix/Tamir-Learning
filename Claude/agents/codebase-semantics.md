@@ -42,15 +42,13 @@ If the skill reference is not provided in your prompt, state this explicitly and
 
 ## Inputs
 
-**Step 3 (primary — after Grafana):**
-- `BUG_CONTEXT_REPORT`
-- `GRAFANA_REPORT` — The errors found in logs (drives your analysis)
+- `BUG_CONTEXT_REPORT` — Parsed ticket with services, time window, identifiers
+- `GRAFANA_REPORT` — The errors found in logs (when available)
+- `CODEBASE_SEMANTICS_REPORT` — Your own previous output (when available, for PR analysis tasks)
 - `OCTOCODE_SKILL_REFERENCE` — Full skill file for octocode tools
-- `OUTPUT_FILE` — e.g., `{OUTPUT_DIR}/codebase-semantics.md`
-
-**Step 4 (parallel — PR/changes):**
-- Same inputs plus `CODEBASE_SEMANTICS_REPORT` (your own Step 3 output)
-- `OUTPUT_FILE` — e.g., `{OUTPUT_DIR}/codebase-semantics-step4.md`
+- `TASK` — **Specific instructions from the orchestrator.** This tells you WHAT to do. Follow it exactly.
+- `OUTPUT_FILE` — Path to write your report
+- `TRACE_FILE` — Path to write your trace log (see Trace File section below)
 
 ## Octocode Workflow (MANDATORY — follow this order)
 
@@ -120,9 +118,17 @@ Before writing your report, verify:
 - [ ] If auth/permission-related: Identity/CallScope tracing table is present
 - [ ] Code was sourced from local clone if available (not just MCP)
 
-## Step 3 Report Structure
+## Report Structures
 
-### Section 0: Error Propagation (REQUIRED when GRAFANA_REPORT provided)
+The orchestrator's `TASK` input tells you which report structure to use. Pick the one that matches your task.
+
+---
+
+### Report Type A: Error Propagation & Flow Analysis
+
+Use this when the TASK asks you to trace errors, map code flows, or analyze service boundaries.
+
+#### Section 0: Error Propagation (REQUIRED when GRAFANA_REPORT provided)
 
 For EACH error from Grafana:
 
@@ -188,9 +194,11 @@ Include artifact_id and direction (inbound/outbound) for each hop.
 
 Code snippets (5-15 lines with line numbers) for entry points and critical paths.
 
-## Step 4 Report (codebase-semantics-step4.md)
+---
 
-Focus on PRs/commits before incident start and after incident end.
+### Report Type B: PR & Change Analysis
+
+Use this when the TASK asks you to find PRs, commits, or repo changes that explain the incident timing.
 
 Required sections:
 1. **Repo changes that could explain why the issue started**
@@ -202,3 +210,29 @@ Required sections:
 - NO "this is the root cause" or "this caused the bug"
 - NO hypothesis formation
 - You enumerate WHERE things CAN fail — the Hypothesis agent determines what DID fail
+- NO reading other agents' trace files (files ending in `-trace-V*.md`)
+
+## Trace File (MANDATORY)
+
+After writing your output file, write a trace file to `TRACE_FILE`. This is for human debugging only — no other agent will read it.
+
+```markdown
+# Trace: codebase-semantics
+
+## Input
+- **Invoked by:** Production Master orchestrator
+- **Task:** [paste the TASK you received]
+- **Inputs received:** [list input names and approximate sizes]
+
+## Actions Log
+| # | Action | Tool/Method | Key Result |
+|---|--------|-------------|------------|
+| 1 | [what you did] | [Grep/Read/octocode/etc] | [key finding or "no results"] |
+| 2 | ... | ... | ... |
+
+## Decisions
+- [Any choices you made and why, e.g., "Used local clone instead of octocode because LOCAL_REPO_PATH was provided"]
+
+## Issues
+- [Any problems encountered, e.g., "octocode returned empty for X, fell back to Grep"]
+```

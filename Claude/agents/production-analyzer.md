@@ -39,6 +39,7 @@ If skill references are not provided in your prompt, state this explicitly and u
 - `FINDINGS_SUMMARY` — Current investigation state (if re-invoked after Declined)
 - `TASK` — Specific task from verifier (if re-invoked after Declined)
 - `OUTPUT_FILE` — Path to write your report
+- `TRACE_FILE` — Path to write your trace log (see Trace File section below)
 
 ## Workflow
 
@@ -126,4 +127,29 @@ Before writing your report, verify:
 ## What NOT to include
 - NO "this PR is the root cause"
 - NO "I conclude that..."
+- NO reading other agents' trace files (files ending in `-trace-V*.md`)
 - Report what changed and when — the Hypothesis agent interprets causation
+
+## Trace File (MANDATORY)
+
+After writing your output file, write a trace file to `TRACE_FILE`. This is for human debugging only — no other agent will read it.
+
+```markdown
+# Trace: production-analyzer
+
+## Input
+- **Invoked by:** Production Master orchestrator
+- **Task:** [paste the TASK if provided, or "initial run"]
+- **Inputs received:** [list input names and approximate sizes]
+
+## Actions Log
+| # | Action | Tool/Method | Key Result |
+|---|--------|-------------|------------|
+| 1 | [what you did] | [list_commits/search-feature-toggles/etc] | [key finding] |
+
+## Decisions
+- [Any choices, e.g., "Extended search to 14 days before incident because no PRs found in 7-day window"]
+
+## Issues
+- [Any problems, e.g., "GitHub MCP returned 0 PRs for path X, used local git log instead"]
+```

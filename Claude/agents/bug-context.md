@@ -14,6 +14,7 @@ You are a bug context parser. You take Jira ticket data and user input ONLY and 
 - `JIRA_DATA` — Raw Jira ticket JSON (all fields + all comments)
 - `USER_INPUT` — Original user message
 - `OUTPUT_FILE` — Path to write your report
+- `TRACE_FILE` — Path to write your trace log (see Trace File section below)
 
 ## Process
 
@@ -115,3 +116,27 @@ Before writing, verify:
 - [ ] No conclusions or root cause speculation present
 - [ ] Artifact Validation table is present with Confidence column for every service
 - [ ] Enhanced Identifiers table is present with Source annotation for each identifier
+- [ ] Trace file written to TRACE_FILE
+
+## Trace File (MANDATORY)
+
+After writing your output file, write a trace file to `TRACE_FILE`. This is for human debugging only — no other agent will read it.
+
+```markdown
+# Trace: bug-context
+
+## Input
+- **Invoked by:** Production Master orchestrator
+- **Inputs received:** [list input names and approximate sizes]
+
+## Actions Log
+| # | Action | Tool/Method | Key Result |
+|---|--------|-------------|------------|
+| 1 | [what you did] | [parsing/extraction] | [key finding] |
+
+## Decisions
+- [Any choices you made, e.g., "Chose UTC+2 for timezone because reporter is in Israel"]
+
+## Issues
+- [Any problems, e.g., "Jira description was empty, relied on comments only"]
+```

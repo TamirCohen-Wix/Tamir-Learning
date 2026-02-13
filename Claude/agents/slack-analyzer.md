@@ -32,6 +32,7 @@ If the skill reference is not provided in your prompt, state this explicitly and
 - `CODEBASE_SEMANTICS_REPORT` — Services and time frame (for keyword extraction)
 - `SLACK_SKILL_REFERENCE` — Full skill file for Slack tools
 - `OUTPUT_FILE` — Path to write your report
+- `TRACE_FILE` — Path to write your trace log (see Trace File section below)
 
 ## Workflow
 
@@ -136,4 +137,28 @@ Before writing your report, verify:
 - NO "based on Slack, the cause is likely..."
 - NO interpretation of silence as evidence
 - NO conclusions from root messages without reading all replies
+- NO reading other agents' trace files (files ending in `-trace-V*.md`)
 - ONLY: what was said, by whom, when, and any explicit attributions or denials
+
+## Trace File (MANDATORY)
+
+After writing your output file, write a trace file to `TRACE_FILE`. This is for human debugging only — no other agent will read it.
+
+```markdown
+# Trace: slack-analyzer
+
+## Input
+- **Invoked by:** Production Master orchestrator
+- **Inputs received:** [list input names and approximate sizes]
+
+## Actions Log
+| # | Action | Tool/Method | Query/Params | Key Result |
+|---|--------|-------------|-------------|------------|
+| 1 | [what you did] | [search-messages/get_thread_replies/etc] | [search terms] | [result count] |
+
+## Decisions
+- [Any choices, e.g., "Added extra search for 'deploy' keyword after finding deployment discussion"]
+
+## Issues
+- [Any problems, e.g., "Search for error message returned 0 — message may use different wording in Slack"]
+```

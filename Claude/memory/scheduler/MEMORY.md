@@ -38,9 +38,22 @@
 - Key tool categories: jira, grafana-datasource, slack, github, gradual-feature-release, devex, octocode
 
 ### Output Directory
-- Production Master creates a directory per run: `debug-<TICKET>-<YYYY-MM-DD-HHmmss>/`
-- Each sub-agent writes its output to `<sub-agent-name>.md` in that directory
-- Sub-agents must be told the output file path and instructed to write their report there
+- Location: `.claude/debug/` inside the repo root (or `./debug/` outside a repo)
+- Directory name: `debug-<TASK-SLUG>-<YYYY-MM-DD-HHmmss>/` where TASK-SLUG is Jira ticket ID or auto-generated summary
+- Each agent gets its OWN subdirectory: `<debug-dir>/<agent-name>/`
+- Output files are versioned: `<agent-name>-output-V<N>.md` (N = invocation count for that agent in this run)
+- **Trace files**: `<agent-name>-trace-V<N>.md` — written alongside output files, contain input + action log
+- Example: `debug-SCHED-4353-2026-02-11-143000/grafana-analyzer/grafana-analyzer-output-V1.md`
+- Example: `debug-SCHED-4353-2026-02-11-143000/grafana-analyzer/grafana-analyzer-trace-V1.md`
+- `findings-summary.md` and `report.md` stay at the debug dir root
+- Sub-agents must be told both OUTPUT_FILE and TRACE_FILE paths
+- **Trace isolation**: Trace files are NEVER passed to other agents. Only the human operator reads them.
+
+### Agent Task-Driven Design
+- Agents do NOT know about orchestration steps ("Step 3", "Step 4", "parallel", "primary")
+- The orchestrator passes a `TASK` input that tells the agent exactly what to do
+- codebase-semantics has two report types: "Report Type A" (error propagation) and "Report Type B" (PR analysis)
+- The orchestrator selects the report type via the TASK field
 
 ### Grafana Queries
 - Sub-agents should run LIVE queries via MCP tools (discovered via ToolSearch), NOT build URLs

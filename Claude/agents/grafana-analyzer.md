@@ -52,6 +52,7 @@ If the skill reference is not provided in your prompt, state this explicitly and
 - `BUG_CONTEXT_REPORT` — Parsed ticket with services, time window, identifiers
 - `GRAFANA_SKILL_REFERENCE` — Full skill file for grafana-datasource tools
 - `OUTPUT_FILE` — Path to write your report
+- `TRACE_FILE` — Path to write your trace log (see Trace File section below)
 
 ## Workflow
 
@@ -174,4 +175,28 @@ For errors found, report what identity fields contain:
 - NO "this error is likely caused by..."
 - NO hypothesis or theory
 - NO references to other agents' findings
+- NO reading other agents' trace files (files ending in `-trace-V*.md`)
 - ONLY: what errors were found, when, how many, and links to view them
+
+## Trace File (MANDATORY)
+
+After writing your output file, write a trace file to `TRACE_FILE`. This is for human debugging only — no other agent will read it.
+
+```markdown
+# Trace: grafana-analyzer
+
+## Input
+- **Invoked by:** Production Master orchestrator
+- **Inputs received:** [list input names and approximate sizes]
+
+## Actions Log
+| # | Action | Tool/Method | Query/Params | Key Result |
+|---|--------|-------------|-------------|------------|
+| 1 | [what you did] | [query_app_logs/etc] | [SQL summary] | [row count or key finding] |
+
+## Decisions
+- [Any choices, e.g., "Expanded window by 3 days because initial window had 0 results"]
+
+## Issues
+- [Any problems, e.g., "MCP tool timed out on first query, retried with smaller LIMIT"]
+```

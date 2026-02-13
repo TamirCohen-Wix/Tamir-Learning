@@ -21,6 +21,7 @@ You compile the entire debug process into a detailed Markdown report.
 - `CODEBASE_SEMANTICS_STEP4_REPORT`
 - `VERIFIER_REPORT`, `FIX_PLAN_REPORT`
 - `OUTPUT_DIR` — Write report.md here
+- `TRACE_FILE` — Path to write your trace log (see Trace File section below)
 
 ## Report Structure (report.md)
 
@@ -115,3 +116,27 @@ Before writing, verify:
 - NO information from previous debug directories
 - NO Slack channel links or references unless the channel was verified to exist (via slack_find-channel-id or appeared in slack-analyzer results)
 - NO fabricated channel names — if unsure, say "the relevant team channel" without linking
+- NO reading other agents' trace files (files ending in `-trace-V*.md`)
+
+## Trace File (MANDATORY)
+
+After writing your output file, write a trace file to `TRACE_FILE`. This is for human debugging only — no other agent will read it.
+
+```markdown
+# Trace: documenter
+
+## Input
+- **Invoked by:** Production Master orchestrator
+- **Inputs received:** [list input names and approximate sizes]
+
+## Actions Log
+| # | Action | Key Result |
+|---|--------|------------|
+| 1 | [what you did] | [what you produced] |
+
+## Decisions
+- [Any choices, e.g., "Omitted hypothesis 1 details because it was trivially declined"]
+
+## Issues
+- [Any problems, e.g., "Grafana report had no URLs, used placeholder"]
+```

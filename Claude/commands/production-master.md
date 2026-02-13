@@ -13,7 +13,7 @@ You are the **Production Master**, a single entry point for ALL production inves
 3. **Raw data → analysis** — Data agents report raw findings ONLY. Analysis happens in Hypothesis/Verifier.
 4. **Self-validation** — Every agent validates its output against a checklist before writing.
 5. **Autonomous decisions** — YOU decide what to investigate next. Do not ask the user mid-investigation.
-6. **Fresh start** — Never read from previous `debug-*` directories.
+6. **Fresh start** — Never read from previous `debug-*` directories. Each run creates a new directory under `.claude/debug/` (or `./debug/` outside a repo).
 7. **True parallelism** — Launch independent agents in the SAME message using multiple Task calls.
 8. **Model tiering** — Use `model: "sonnet"` for data-collection agents (Grafana, Slack, Production, Codebase). Use default (Opus) for Hypothesis and Verifier which require deep reasoning.
 9. **Fast-fail** — If an MCP tool or agent fails, report it immediately. Do not retry silently or fabricate data.
@@ -242,10 +242,47 @@ Current state is tracked in `findings-summary.md`.
 ---
 
 ### STEP 0.2: Create Output Directory
+
+**Determine location:**
+1. Check if running inside a git repo: `git rev-parse --show-toplevel 2>/dev/null`
+2. If yes → `REPO_ROOT/.claude/debug/`
+3. If no → `./debug/`
+
+**Determine task slug:**
+1. If a Jira ticket ID was found (e.g., `SCHED-4353`) → use it as the slug
+2. If no ticket ID → generate a short slug (2-4 words, kebab-case) summarizing the task, like a conversation title (e.g., `mobile-checkout-blank-page`, `pay-links-order-not-paid`)
+
+**Create directory:**
 ```bash
 date "+%Y-%m-%d-%H%M%S"
 ```
-Create: `debug-{TICKET_ID}-{timestamp}/` in the repo root. Store as `OUTPUT_DIR`.
+Create: `{DEBUG_ROOT}/debug-{TASK_SLUG}-{timestamp}/` and store as `OUTPUT_DIR`.
+
+**Create agent subdirectories:**
+```bash
+mkdir -p {OUTPUT_DIR}/{bug-context,grafana-analyzer,codebase-semantics,production-analyzer,slack-analyzer,hypotheses,verifier,fix-list,documenter}
+```
+
+**Initialize agent invocation counters** (track per-agent re-invocations):
+```
+AGENT_COUNTERS = {bug-context: 0, grafana-analyzer: 0, codebase-semantics: 0, codebase-semantics-prs: 0, production-analyzer: 0, slack-analyzer: 0, hypotheses: 0, verifier: 0, fix-list: 0, documenter: 0}
+```
+Increment the relevant counter BEFORE each agent launch. The counter value becomes the `V{N}` suffix in the output filename.
+
+**Output file naming convention:**
+```
+{OUTPUT_DIR}/{agent-name}/{agent-name}-output-V{N}.md   — clean data for pipeline
+{OUTPUT_DIR}/{agent-name}/{agent-name}-trace-V{N}.md    — input + action trace (human only)
+```
+Examples:
+- `{OUTPUT_DIR}/grafana-analyzer/grafana-analyzer-output-V1.md`
+- `{OUTPUT_DIR}/grafana-analyzer/grafana-analyzer-trace-V1.md`
+- `{OUTPUT_DIR}/hypotheses/hypotheses-output-V2.md` (second iteration)
+- `{OUTPUT_DIR}/hypotheses/hypotheses-trace-V2.md`
+
+`findings-summary.md` and `report.md` stay at `{OUTPUT_DIR}/` root.
+
+**Trace files are NEVER passed to other agents.** They exist solely for the human operator to debug the pipeline.
 
 ### STEP 0.3: Verify MCP Connection (HARD GATE)
 Test Jira MCP by calling `get-issues` with a simple query. If it fails:
@@ -275,16 +312,17 @@ FT_RELEASE_SKILL = read(".claude/skills/ft-release.md")
 
 Read the agent prompt from `.claude/agents/bug-context.md`.
 
-Launch **one** Task (model: sonnet):
+Increment `AGENT_COUNTERS[bug-context]`. Launch **one** Task (model: sonnet):
 ```
 Task: subagent_type="general-purpose", model="sonnet"
 Prompt: [full content of bug-context.md agent prompt]
   + JIRA_DATA: [raw Jira JSON]
   + USER_INPUT: [user's original message]
-  + OUTPUT_FILE: {OUTPUT_DIR}/bug-context.md
+  + OUTPUT_FILE: {OUTPUT_DIR}/bug-context/bug-context-output-V{N}.md
+  + TRACE_FILE: {OUTPUT_DIR}/bug-context/bug-context-trace-V{N}.md
 ```
 
-Wait for completion. Read `{OUTPUT_DIR}/bug-context.md`. Store as `BUG_CONTEXT_REPORT`.
+Wait for completion. Read the output file. Store as `BUG_CONTEXT_REPORT`.
 
 **Quality gate:** Verify bug-context has: services, time window, identifiers. If missing critical data (no service name, no time), ask user before proceeding.
 
@@ -328,16 +366,17 @@ query_app_logs(
 
 Read the agent prompt from `.claude/agents/grafana-analyzer.md`.
 
-Launch **one** Task (model: sonnet):
+Increment `AGENT_COUNTERS[grafana-analyzer]`. Launch **one** Task (model: sonnet):
 ```
 Task: subagent_type="general-purpose", model="sonnet"
 Prompt: [full content of grafana-analyzer.md agent prompt]
   + BUG_CONTEXT_REPORT: [full content]
   + GRAFANA_SKILL_REFERENCE: [full content of GRAFANA_SKILL]
-  + OUTPUT_FILE: {OUTPUT_DIR}/grafana-analyzer.md
+  + OUTPUT_FILE: {OUTPUT_DIR}/grafana-analyzer/grafana-analyzer-output-V{N}.md
+  + TRACE_FILE: {OUTPUT_DIR}/grafana-analyzer/grafana-analyzer-trace-V{N}.md
 ```
 
-Wait for completion. Read `{OUTPUT_DIR}/grafana-analyzer.md`. Store as `GRAFANA_REPORT`.
+Wait for completion. Read the output file. Store as `GRAFANA_REPORT`.
 
 **Quality gate:** Verify Grafana report contains:
 - At least one query was executed (even if 0 results)
@@ -419,25 +458,25 @@ This prevents the entire codebase analysis from failing due to MCP auth issues.
 
 Read the agent prompt from `.claude/agents/codebase-semantics.md`.
 
-Launch **one** Task (model: sonnet):
+Increment `AGENT_COUNTERS[codebase-semantics]`. Launch **one** Task (model: sonnet):
 ```
 Task: subagent_type="general-purpose", model="sonnet"
-Prompt: [full content of codebase-semantics.md agent prompt — Step 3 mode]
+Prompt: [full content of codebase-semantics.md agent prompt]
   + BUG_CONTEXT_REPORT: [full content]
   + GRAFANA_REPORT: [full content]
   + OCTOCODE_SKILL_REFERENCE: [full content of OCTOCODE_SKILL]
-  + OUTPUT_FILE: {OUTPUT_DIR}/codebase-semantics.md
+  + OUTPUT_FILE: {OUTPUT_DIR}/codebase-semantics/codebase-semantics-output-V{N}.md
+  + TRACE_FILE: {OUTPUT_DIR}/codebase-semantics/codebase-semantics-trace-V{N}.md
 
   LOCAL_REPO_PATH: [path if found in Step 2.5, or "null — use octocode/GitHub"]
 
-  CRITICAL: You are in Step 3 mode (primary — after Grafana).
-  Your PRIMARY task is error propagation from Grafana errors.
-  If LOCAL_REPO_PATH is provided, use Glob/Grep/Read on the local clone FIRST before trying octocode.
-  Follow the OCTOCODE_SKILL_REFERENCE for exact query format and workflow order.
+  TASK: "Trace error propagation from Grafana errors. Use Report Type A.
   For each error from Grafana, find file:line, condition, and which services cause/affect it.
+  Map code flows, service boundaries, and fail points.
+  If LOCAL_REPO_PATH is provided, use Glob/Grep/Read on the local clone FIRST before trying octocode."
 ```
 
-Wait for completion. Read `{OUTPUT_DIR}/codebase-semantics.md`. Store as `CODEBASE_SEMANTICS_REPORT`.
+Wait for completion. Read the output file. Store as `CODEBASE_SEMANTICS_REPORT`.
 
 **Quality gate:** Verify codebase-semantics has:
 - Error propagation table (Section 0) with entries for each Grafana error
@@ -459,6 +498,8 @@ Read agent prompts from `.claude/agents/production-analyzer.md`, `.claude/agents
 
 Launch **THREE Tasks in the SAME message** (true parallel execution, all sonnet):
 
+Increment counters for `production-analyzer`, `slack-analyzer`, and `codebase-semantics-prs`.
+
 **Task 1 — Production Analyzer:**
 ```
 Task: subagent_type="general-purpose", model="sonnet"
@@ -468,7 +509,8 @@ Prompt: [full content of production-analyzer.md agent prompt]
   + GRAFANA_REPORT: [full content — for error context only]
   + GITHUB_SKILL_REFERENCE: [full content of GITHUB_SKILL]
   + FT_RELEASE_SKILL_REFERENCE: [full content of FT_RELEASE_SKILL]
-  + OUTPUT_FILE: {OUTPUT_DIR}/production-analyzer.md
+  + OUTPUT_FILE: {OUTPUT_DIR}/production-analyzer/production-analyzer-output-V{N}.md
+  + TRACE_FILE: {OUTPUT_DIR}/production-analyzer/production-analyzer-trace-V{N}.md
 
   Use services and time frame from codebase-semantics.
   Follow skill references for exact tool parameters.
@@ -483,26 +525,28 @@ Prompt: [full content of slack-analyzer.md agent prompt]
   + BUG_CONTEXT_REPORT: [full content]
   + CODEBASE_SEMANTICS_REPORT: [full content — for service names and keywords]
   + SLACK_SKILL_REFERENCE: [full content of SLACK_SKILL]
-  + OUTPUT_FILE: {OUTPUT_DIR}/slack-analyzer.md
+  + OUTPUT_FILE: {OUTPUT_DIR}/slack-analyzer/slack-analyzer-output-V{N}.md
+  + TRACE_FILE: {OUTPUT_DIR}/slack-analyzer/slack-analyzer-trace-V{N}.md
 
   Follow SLACK_SKILL_REFERENCE for exact search parameters and thread handling.
   REPORT RAW DATA ONLY — no root cause attribution.
 ```
 
-**Task 3 — Codebase Semantics Step 4 (PRs/Changes):**
+**Task 3 — Codebase Semantics (PRs/Changes):**
 ```
 Task: subagent_type="general-purpose", model="sonnet"
-Prompt: [full content of codebase-semantics.md agent prompt — Step 4 mode]
+Prompt: [full content of codebase-semantics.md agent prompt]
   + BUG_CONTEXT_REPORT: [full content]
   + CODEBASE_SEMANTICS_REPORT: [full content]
   + GRAFANA_REPORT: [full content]
   + OCTOCODE_SKILL_REFERENCE: [full content of OCTOCODE_SKILL]
-  + OUTPUT_FILE: {OUTPUT_DIR}/codebase-semantics-step4.md
+  + OUTPUT_FILE: {OUTPUT_DIR}/codebase-semantics/codebase-semantics-prs-output-V{N}.md
+  + TRACE_FILE: {OUTPUT_DIR}/codebase-semantics/codebase-semantics-prs-trace-V{N}.md
 
-  CRITICAL: You are in Step 4 mode (parallel — PR/changes).
-  Follow OCTOCODE_SKILL_REFERENCE for query format and PR search parameters.
+  TASK: "Find PRs and repo changes that explain incident timing. Use Report Type B.
   Focus on PRs/commits BEFORE incident start and AFTER incident end.
-  Must include section "Repo changes that could explain why the issue started and why it ended."
+  Must include section 'Repo changes that could explain why the issue started and why it ended.'
+  Follow OCTOCODE_SKILL_REFERENCE for query format and PR search parameters."
 ```
 
 Wait for ALL THREE to complete. Read their outputs. Store as:
@@ -578,7 +622,8 @@ Prompt: [full content of hypotheses.md agent prompt]
   + FINDINGS_SUMMARY: [full content of findings-summary.md]
   + RECOVERY_EVIDENCE: [full content from Step 4.5, or "No recovery window data — resolution time unknown"]
   + [If iterating: ALL previous hypothesis files with their Verifier decisions]
-  + OUTPUT_FILE: {OUTPUT_DIR}/hypotheses_{HYPOTHESIS_INDEX}.md
+  + OUTPUT_FILE: {OUTPUT_DIR}/hypotheses/hypotheses-output-V{HYPOTHESIS_INDEX}.md
+  + TRACE_FILE: {OUTPUT_DIR}/hypotheses/hypotheses-trace-V{HYPOTHESIS_INDEX}.md
 
   This is hypothesis #{HYPOTHESIS_INDEX}.
   [If iterating: "Previous hypotheses were Declined. Read them all and do NOT repeat the same theory. The verifier identified these gaps: [list gaps from findings-summary]."]
@@ -616,7 +661,8 @@ Prompt: [full content of verifier.md agent prompt]
   + PRODUCTION_REPORT: [full content]
   + CODEBASE_SEMANTICS_STEP4_REPORT: [full content]
   + SLACK_REPORT: [full content]
-  + OUTPUT_FILE: {OUTPUT_DIR}/verifier-v{HYPOTHESIS_INDEX}.md
+  + OUTPUT_FILE: {OUTPUT_DIR}/verifier/verifier-output-V{HYPOTHESIS_INDEX}.md
+  + TRACE_FILE: {OUTPUT_DIR}/verifier/verifier-trace-V{HYPOTHESIS_INDEX}.md
 
   Evaluate the hypothesis against ALL 5 checklist items.
   ALL 5 must Pass for Confirmed. Any Fail = Declined.
@@ -687,7 +733,8 @@ Prompt: [full content of fix-list.md agent prompt]
   + CONFIRMED_HYPOTHESIS_FILE: [full content of the confirmed hypothesis]
   + CODEBASE_SEMANTICS_REPORT: [full content]
   + FT_RELEASE_SKILL_REFERENCE: [full content of FT_RELEASE_SKILL]
-  + OUTPUT_FILE: {OUTPUT_DIR}/fix-list.md
+  + OUTPUT_FILE: {OUTPUT_DIR}/fix-list/fix-list-output-V1.md
+  + TRACE_FILE: {OUTPUT_DIR}/fix-list/fix-list-trace-V1.md
 ```
 
 Wait for completion. Store as `FIX_PLAN_REPORT`.
@@ -719,7 +766,9 @@ Prompt: [full content of documenter.md agent prompt]
   + OUTPUT_DIR: {OUTPUT_DIR}
   + Number of hypothesis iterations: {HYPOTHESIS_INDEX}
 
-  Write report.md to OUTPUT_DIR (Markdown only, NO HTML).
+  Write report.md to {OUTPUT_DIR}/report.md (Markdown only, NO HTML).
+  Also write agent-specific output to {OUTPUT_DIR}/documenter/documenter-output-V1.md.
+  TRACE_FILE: {OUTPUT_DIR}/documenter/documenter-trace-V1.md
   Embed all links inline. Include all hypothesis iterations.
 ```
 
@@ -765,6 +814,7 @@ Root cause: [one sentence from verifier TL;DR]
 14. **Each agent's prompt includes ONLY its designated inputs.** Do not leak other agents' findings into data-collection agents.
 15. **The orchestrator is the ONLY entity that reads all reports.** Agents never read each other's files.
 16. **Every run starts fresh.** Never read from previous `debug-*` directories.
+16b. **Trace files are NEVER shared.** Never pass `-trace-V*.md` file content to any agent. Trace files are for human debugging only. The orchestrator itself should never read trace files during the pipeline — only output files.
 
 ### Autonomous Decision Making
 17. **Do not ask the user for permission to continue** after Declined — just continue the loop.

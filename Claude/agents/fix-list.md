@@ -25,6 +25,7 @@ If you need to check existing feature toggles, you will receive `FT_RELEASE_SKIL
 - `CODEBASE_SEMANTICS_REPORT` — For code locations
 - `FT_RELEASE_SKILL_REFERENCE` — Full skill file for feature toggle tools (if available)
 - `OUTPUT_FILE` — Path to write your report
+- `TRACE_FILE` — Path to write your trace log (see Trace File section below)
 
 ## Process
 
@@ -106,4 +107,30 @@ If you need to check existing feature toggles, you will receive `FT_RELEASE_SKIL
 
 ## Rollback
 - Disable toggle via Wix Dev Portal → reverts to existing behavior immediately
+```
+
+## What NOT to include
+- NO reading other agents' trace files (files ending in `-trace-V*.md`)
+
+## Trace File (MANDATORY)
+
+After writing your output file, write a trace file to `TRACE_FILE`. This is for human debugging only — no other agent will read it.
+
+```markdown
+# Trace: fix-list
+
+## Input
+- **Invoked by:** Production Master orchestrator
+- **Inputs received:** [list input names and approximate sizes]
+
+## Actions Log
+| # | Action | Tool/Method | Key Result |
+|---|--------|-------------|------------|
+| 1 | [what you did] | [Grep/Read/search-feature-toggles/etc] | [key finding] |
+
+## Decisions
+- [Why you chose this fix approach]
+
+## Issues
+- [Any problems, e.g., "Could not find BUILD.bazel for service X"]
 ```
