@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Edit(*)",
+      "MultiEdit(*)",
+      "Write(*)",
+      "Read(*)",
+      "NotebookEdit(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "mcp__mcp-s__*",
+      "mcp__Slack__*",
+      "mcp__grafana-mcp__*",
+      "mcp__grafana-datasource__*",
+      "mcp__github__*",
+      "mcp__jira__*",
+      "mcp__context-7__*",
+      "mcp__FT-release__*",
+      "mcp__octocode__*"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf *)"
+    ]
+  }
+}
