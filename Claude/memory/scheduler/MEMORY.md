@@ -16,6 +16,7 @@
 - Agent files live in `~/.claude/agents/` (USER scope), command files in `~/.claude/commands/` (USER scope)
 - When making pipeline changes, always update the relevant agent/command files
 - **File location consistency:** Agents and commands are USER-scoped (`~/.claude/`). Only auto-memory is project-scoped. Never create project-scoped duplicates of agents/commands.
+- **ALL subagents use `model: "sonnet"`** — no exceptions, no Opus tiering
 
 ### Agent-to-Tool Mapping
 | Agent | MCP Tool Categories | Key Tools |
