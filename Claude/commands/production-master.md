@@ -232,9 +232,13 @@ The investigation progresses through these explicit states:
 
 ```
 INITIALIZING → CONTEXT_GATHERING → LOG_ANALYSIS → CODE_ANALYSIS →
-PARALLEL_DATA_FETCH → HYPOTHESIS_GENERATION → VERIFICATION →
+PARALLEL_DATA_FETCH → HYPOTHESIS_GENERATION (includes verification) →
   ├── CONFIRMED → FIX_PLANNING → DOCUMENTING → COMPLETE
   └── DECLINED → [re-gather data] → HYPOTHESIS_GENERATION (loop, max 5)
+
+Note: When agent teams are enabled (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1),
+HYPOTHESIS_GENERATION uses parallel competing hypotheses + skeptic cross-examination.
+Otherwise, sequential hypothesis → verifier loop.
 ```
 
 Current state is tracked in `findings-summary.md`.
@@ -260,12 +264,12 @@ Create: `{DEBUG_ROOT}/debug-{TASK_SLUG}-{timestamp}/` and store as `OUTPUT_DIR`.
 
 **Create agent subdirectories:**
 ```bash
-mkdir -p {OUTPUT_DIR}/{bug-context,grafana-analyzer,codebase-semantics,production-analyzer,slack-analyzer,hypotheses,verifier,fix-list,documenter}
+mkdir -p {OUTPUT_DIR}/{bug-context,grafana-analyzer,codebase-semantics,production-analyzer,slack-analyzer,hypotheses,verifier,skeptic,fix-list,documenter}
 ```
 
 **Initialize agent invocation counters** (track per-agent re-invocations):
 ```
-AGENT_COUNTERS = {bug-context: 0, grafana-analyzer: 0, codebase-semantics: 0, codebase-semantics-prs: 0, production-analyzer: 0, slack-analyzer: 0, hypotheses: 0, verifier: 0, fix-list: 0, documenter: 0}
+AGENT_COUNTERS = {bug-context: 0, grafana-analyzer: 0, codebase-semantics: 0, codebase-semantics-prs: 0, production-analyzer: 0, slack-analyzer: 0, hypotheses: 0, verifier: 0, skeptic: 0, fix-list: 0, documenter: 0}
 ```
 Increment the relevant counter BEFORE each agent launch. The counter value becomes the `V{N}` suffix in the output filename.
 
@@ -636,15 +640,143 @@ If no resolution time is known, skip this step — the hypothesis agent will not
 
 ---
 
-### STEP 5: Hypothesis (One at a Time)
+### STEP 5: Hypothesis Generation & Verification
 
 **State:** `HYPOTHESIS_GENERATION`
 
 Maintain counter `HYPOTHESIS_INDEX` (start at 1).
 
+**Choose execution mode based on environment:**
+
+```
+IF environment variable CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS == "1":
+  → Use STEP 5A (Agent Team — competing hypotheses)
+ELSE:
+  → Use STEP 5B (Sequential subagent — legacy fallback)
+```
+
+---
+
+#### STEP 5A: Agent Team — Competing Hypotheses (PREFERRED)
+
+**Prerequisites:** All data reports from Steps 1-4.5 are available.
+
+##### 5A.1: Generate Candidate Hypotheses (Lead does this inline)
+
+Analyze `findings-summary.md` and all data reports. Generate exactly 2 candidate theories:
+
+- **Theory A:** The most likely root cause based on the strongest evidence
+- **Theory B:** An alternative root cause that explains the same symptoms differently
+
+For each theory, write a 2-3 sentence description including:
+- What the theory claims
+- What evidence supports it
+- What specific queries/searches would prove or disprove it
+
+##### 5A.2: Create Investigation Team
+
+Read agent prompts from `.claude/agents/hypotheses.md` and `.claude/agents/skeptic.md`.
+
+Increment `AGENT_COUNTERS[hypotheses]` TWICE (once for A, once for B).
+Create agent subdirectory for skeptic if not exists: `mkdir -p {OUTPUT_DIR}/skeptic`
+
+Launch an agent team with 3 teammates using `Task` with `mode: "delegate"`. All teammates use `model: "sonnet"`.
+
+**Teammate 1 — hypothesis-tester-A:**
+```
+Name: "hypothesis-tester-A"
+Prompt: [full content of hypotheses.md agent prompt]
+  + BUG_CONTEXT_REPORT: [full content]
+  + CODEBASE_SEMANTICS_REPORT: [full content]
+  + GRAFANA_REPORT: [full content]
+  + PRODUCTION_REPORT: [full content]
+  + CODEBASE_SEMANTICS_STEP4_REPORT: [full content]
+  + SLACK_REPORT: [full content]
+  + FINDINGS_SUMMARY: [full content of findings-summary.md]
+  + RECOVERY_EVIDENCE: [full content from Step 4.5, or "No recovery window data"]
+  + [If iterating: ALL previous hypothesis files with their Skeptic decisions]
+
+  THEORY: "[Theory A description — what to test, what evidence to look for]"
+
+  You are running in Mode 2 (teammate). You CAN run Grafana queries, search code, and check
+  feature toggles to gather ADDITIONAL evidence for your theory.
+
+  This is hypothesis iteration #{HYPOTHESIS_INDEX}.
+  [If iterating: "Previous hypotheses were Declined. The skeptic identified these gaps: [gaps].
+  You MUST address these specific gaps."]
+
+  OUTPUT_FILE: {OUTPUT_DIR}/hypotheses/hypotheses-tester-A-output-V{N}.md
+  TRACE_FILE: {OUTPUT_DIR}/hypotheses/hypotheses-tester-A-trace-V{N}.md
+
+  When done, complete your task with a summary of your findings.
+```
+
+**Teammate 2 — hypothesis-tester-B:**
+```
+Name: "hypothesis-tester-B"
+Prompt: [full content of hypotheses.md agent prompt]
+  + [Same data reports as Teammate 1]
+
+  THEORY: "[Theory B description — what to test, what evidence to look for]"
+
+  You are running in Mode 2 (teammate). You CAN run Grafana queries, search code, and check
+  feature toggles to gather ADDITIONAL evidence for your theory.
+
+  This is hypothesis iteration #{HYPOTHESIS_INDEX}.
+  [If iterating: same declined context as Teammate 1]
+
+  OUTPUT_FILE: {OUTPUT_DIR}/hypotheses/hypotheses-tester-B-output-V{N}.md
+  TRACE_FILE: {OUTPUT_DIR}/hypotheses/hypotheses-tester-B-trace-V{N}.md
+
+  When done, complete your task with a summary of your findings.
+```
+
+**Teammate 3 — skeptic:**
+```
+Name: "skeptic"
+Prompt: [full content of skeptic.md agent prompt]
+  + BUG_CONTEXT_REPORT: [full content]
+  + GRAFANA_REPORT: [full content]
+  + PRODUCTION_REPORT: [full content]
+  + CODEBASE_SEMANTICS_STEP4_REPORT: [full content]
+  + SLACK_REPORT: [full content]
+  + FINDINGS_SUMMARY: [full content of findings-summary.md]
+
+  Wait for hypothesis-tester-A and hypothesis-tester-B to complete their tasks.
+  Read BOTH their output files:
+  - HYPOTHESIS_A_REPORT: {OUTPUT_DIR}/hypotheses/hypotheses-tester-A-output-V{N}.md
+  - HYPOTHESIS_B_REPORT: {OUTPUT_DIR}/hypotheses/hypotheses-tester-B-output-V{N}.md
+
+  Cross-examine both hypotheses. Apply the 5-point checklist.
+  Produce a verdict: Confirmed or Declined with confidence 0-100%.
+  If neither passes, explain exactly what evidence is missing.
+
+  OUTPUT_FILE: {OUTPUT_DIR}/skeptic/skeptic-output-V{HYPOTHESIS_INDEX}.md
+  TRACE_FILE: {OUTPUT_DIR}/skeptic/skeptic-trace-V{HYPOTHESIS_INDEX}.md
+```
+
+##### 5A.3: Create Task List
+
+Create tasks for the team:
+```
+Task 1: "Test hypothesis A: [Theory A title]" — assigned to hypothesis-tester-A, no dependencies
+Task 2: "Test hypothesis B: [Theory B title]" — assigned to hypothesis-tester-B, no dependencies
+Task 3: "Cross-examine and produce verdict" — assigned to skeptic, blocked by Task 1 and Task 2
+```
+
+##### 5A.4: Wait for Verdict
+
+Wait for Task 3 (skeptic/reconcile) to complete. Read the skeptic's output file.
+
+**Proceed to DECISION POINT below.**
+
+---
+
+#### STEP 5B: Sequential Subagent (Fallback — when Agent Teams disabled)
+
 Read the agent prompt from `.claude/agents/hypotheses.md`.
 
-Launch **one** Task (model: sonnet):
+Increment `AGENT_COUNTERS[hypotheses]`. Launch **one** Task (model: sonnet):
 ```
 Task: subagent_type="general-purpose", model="sonnet"
 Prompt: [full content of hypotheses.md agent prompt]
@@ -667,7 +799,6 @@ Prompt: [full content of hypotheses.md agent prompt]
 ```
 
 Wait for completion. Read the output. Store as `CURRENT_HYPOTHESIS_REPORT`.
-Set `CURRENT_HYPOTHESIS_FILE = {OUTPUT_DIR}/hypotheses_{HYPOTHESIS_INDEX}.md`.
 
 **Quality gate:** Verify hypothesis has:
 - `status: Unknown` at top
@@ -677,11 +808,7 @@ Set `CURRENT_HYPOTHESIS_FILE = {OUTPUT_DIR}/hypotheses_{HYPOTHESIS_INDEX}.md`.
 
 **Status update:** "Hypothesis #{HYPOTHESIS_INDEX} generated. Verifying..."
 
----
-
-### STEP 6: Verifier
-
-**State:** `VERIFICATION`
+##### STEP 5B.2: Verifier (Sequential only)
 
 Read the agent prompt from `.claude/agents/verifier.md`.
 
@@ -690,7 +817,7 @@ Launch **one** Task (model: sonnet):
 Task: subagent_type="general-purpose", model="sonnet"
 Prompt: [full content of verifier.md agent prompt]
   + BUG_CONTEXT_REPORT: [full content]
-  + CURRENT_HYPOTHESIS_FILE: {CURRENT_HYPOTHESIS_FILE}
+  + CURRENT_HYPOTHESIS_FILE: {OUTPUT_DIR}/hypotheses/hypotheses-output-V{HYPOTHESIS_INDEX}.md
   + CURRENT_HYPOTHESIS_REPORT: [full content]
   + GRAFANA_REPORT: [full content]
   + PRODUCTION_REPORT: [full content]
@@ -704,13 +831,19 @@ Prompt: [full content of verifier.md agent prompt]
   You MUST update the hypothesis file: change status and add Verifier Decision section.
 ```
 
-Wait for completion. Read verifier report and updated hypothesis file.
+Wait for completion. Read verifier report.
 
-#### DECISION POINT — Autonomous Logic
+**Proceed to DECISION POINT below.**
 
-**Read the verifier's verdict.** Then apply this decision tree:
+---
 
-##### If CONFIRMED:
+### STEP 6: Decision Point (shared by 5A and 5B)
+
+**State:** `VERIFICATION`
+
+Read the verdict (from skeptic in 5A, or verifier in 5B).
+
+#### If CONFIRMED:
 1. Verify the orchestrator override conditions:
    - Are all 5 checklist items clearly Pass?
    - Is there no "we do not know WHY" for intermediate causes?
@@ -718,37 +851,37 @@ Wait for completion. Read verifier report and updated hypothesis file.
    - If ANY override triggers: treat as DECLINED and continue below.
 2. If truly Confirmed: proceed to **STEP 7** (Fix List).
 
-##### If DECLINED:
+#### If DECLINED:
 1. **Update findings-summary.md** with:
    - Current state: `DECLINED_ITERATION_{HYPOTHESIS_INDEX}`
    - Current checklist status (Pass/Fail per item)
    - What's proven, what's missing
-   - Next tasks from verifier's "Next Tasks (Dynamic Order)"
+   - Next tasks from verdict's evidence gaps
    - Updated agent invocation log
 2. **Check iteration limit:** If `HYPOTHESIS_INDEX >= 5`:
    - Present all findings to user
    - Show what's proven vs unknown
    - Ask: continue investigating or document with best hypothesis?
-3. **Check for confidence floor:** If verifier confidence >= 70% but not all 5 pass:
+3. **Check for confidence floor:** If confidence >= 70% but not all 5 pass:
    - Note this in findings-summary as "High confidence, incomplete proof"
    - If this is the 3rd+ iteration with similar confidence, consider presenting to user
-4. **Parse verifier's specific evidence gaps and TARGETED queries:**
-   - Read the verifier's "Next Tasks" section for EXACT SQL queries
-   - If verifier provided exact SQL queries: **run them directly via `query_app_logs`** (no need to re-launch the full Grafana agent). Store results as `TARGETED_GRAFANA_RESULTS`.
+4. **Parse specific evidence gaps and TARGETED queries:**
+   - Read the verdict's evidence gaps section for EXACT SQL queries
+   - If exact SQL queries provided: **run them directly via `query_app_logs`** (no need to re-launch the full Grafana agent). Store results as `TARGETED_GRAFANA_RESULTS`.
    - For each evidence gap:
-     - "no MSID link" → search by booking ID, order ID, time correlation using verifier's SQL
-     - "no stack trace" → query with error_class filter using verifier's SQL
-     - "no timeline" → run hourly aggregation query using verifier's SQL
-     - "no recovery explanation" → search all levels around recovery time using verifier's SQL
-   - **Update findings-summary.md with targeted results BEFORE generating next hypothesis**
-5. **Execute remaining Next Tasks from verifier:**
-   - If verifier requested agent re-runs (codebase, Slack, production):
-     - Run agents with their TAILORED TASK from the verifier
+     - "no MSID link" → search by booking ID, order ID, time correlation using the SQL
+     - "no stack trace" → query with error_class filter using the SQL
+     - "no timeline" → run hourly aggregation query using the SQL
+     - "no recovery explanation" → search all levels around recovery time using the SQL
+   - **Update findings-summary.md with targeted results BEFORE next iteration**
+5. **Execute remaining evidence-gathering tasks:**
+   - If verdict requested agent re-runs (codebase, Slack, production):
+     - Run agents with their TAILORED TASK from the verdict
      - Pass findings-summary.md AND relevant skill files to each agent
      - Independent agents can run in parallel (multiple Task calls in same message, model: sonnet)
    - If no specific next tasks:
-     - Re-run Step 4 (all three agents in parallel) with verifier's "what each data agent should do"
-6. **Increment HYPOTHESIS_INDEX.** Go to **STEP 5** (new hypothesis) with TARGETED_GRAFANA_RESULTS as additional input.
+     - Re-run Step 4 (all three agents in parallel) with the verdict's guidance
+6. **Increment HYPOTHESIS_INDEX.** Go to **STEP 5** (new hypothesis round) with TARGETED_GRAFANA_RESULTS as additional input.
 7. **MANDATORY: Do NOT stop.** Continue the loop until Confirmed or iteration limit.
 
 ---
@@ -764,7 +897,7 @@ Launch **one** Task (model: sonnet):
 Task: subagent_type="general-purpose", model="sonnet"
 Prompt: [full content of fix-list.md agent prompt]
   + BUG_CONTEXT_REPORT: [full content]
-  + VERIFIER_REPORT: [full content]
+  + VERIFIER_REPORT: [full content of skeptic verdict (5A) or verifier report (5B)]
   + CONFIRMED_HYPOTHESIS_FILE: [full content of the confirmed hypothesis]
   + CODEBASE_SEMANTICS_REPORT: [full content]
   + FT_RELEASE_SKILL_REFERENCE: [full content of FT_RELEASE_SKILL]

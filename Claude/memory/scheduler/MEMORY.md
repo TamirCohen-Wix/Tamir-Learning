@@ -28,6 +28,7 @@
 | bug-context | jira (4) | `get-issues`, `get-issue-changelog` |
 | hypotheses | any (as needed) | grafana, feature toggles, octocode |
 | verifier | any (as needed) | grafana, devex, github, feature toggles, jira |
+| skeptic | any (as needed) | cross-examines two hypotheses, applies 5-point checklist |
 | fix-list | gradual-feature-release (6) | `search-feature-toggles`, `create-feature-release` |
 | documenter | jira (2), slack (1) | `comment-on-issue`, `find-channel-id` |
 
@@ -92,6 +93,15 @@
 - **NEVER fabricate channel names** — if you don't know the exact channel, omit the reference or say "the relevant team channel"
 - **Verify ALL hyperlinks before posting** — broken links undermine credibility
 - When posting investigation summaries to Slack threads, keep links to verified resources only (Grafana URLs, Jira tickets, GitHub PRs)
+
+### Agent Teams (Hypothesis Phase)
+- Steps 5-6 use agent teams (experimental) when `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set
+- 3 teammates: hypothesis-tester-A, hypothesis-tester-B, skeptic
+- Tasks: A and B test competing theories in parallel, skeptic is blocked by both, cross-examines and produces verdict
+- Fallback: if env var not set, uses sequential subagent approach (old Steps 5-6)
+- Setting lives in `~/.claude/settings.json` under `env`
+- Skeptic agent: `~/.claude/agents/skeptic.md` — replaces verifier role within teams
+- `verifier.md` still exists for sequential fallback path
 
 ## Codebase Patterns
 
