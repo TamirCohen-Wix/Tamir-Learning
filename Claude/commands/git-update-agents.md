@@ -22,6 +22,10 @@ rsync -av --delete ~/.claude/skills/ /Users/tamirc/Projects/Tamir-Learning/Claud
 rsync -av --delete ~/.claude/hooks/ /Users/tamirc/Projects/Tamir-Learning/Claude/hooks/
 rsync -av --delete ~/.claude/output-styles/ /Users/tamirc/Projects/Tamir-Learning/Claude/output-styles/
 
+# Sync project-scoped skills (scheduler repo)
+mkdir -p /Users/tamirc/Projects/Tamir-Learning/Claude/project-skills/scheduler/
+rsync -av --delete /Users/tamirc/IdeaProjects/scheduler/.claude/skills/ /Users/tamirc/Projects/Tamir-Learning/Claude/project-skills/scheduler/
+
 # Sync individual files
 cp ~/.claude/settings.json /Users/tamirc/Projects/Tamir-Learning/Claude/settings.json
 cp ~/.claude/settings.local.json /Users/tamirc/Projects/Tamir-Learning/Claude/settings.local.json
