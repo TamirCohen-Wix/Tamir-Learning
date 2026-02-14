@@ -1,3 +1,8 @@
+---
+description: "Feature Toggle (FT-release) — MCP Skill Reference"
+user-invocable: false
+---
+
 # Feature Toggle (FT-release) — MCP Skill Reference
 
 Server name: `FT-release`

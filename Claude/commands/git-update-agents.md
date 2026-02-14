@@ -7,7 +7,7 @@ Sync all Claude configuration files to the Tamir-Learning repo for version track
 Copy these directories from `~/.claude/` to `/Users/tamirc/Projects/Tamir-Learning/Claude/`:
 - `agents/` — all agent `.md` files
 - `commands/` — all command `.md` files
-- `skills/` — all skill `.md` files
+- `skills/` — all skill directories (`<name>/SKILL.md`)
 - `settings.json` — user-level settings
 - `settings.local.json` — local settings overrides
 - `projects/-Users-tamirc-IdeaProjects-scheduler/memory/MEMORY.md` — copy as `memory/scheduler/MEMORY.md`

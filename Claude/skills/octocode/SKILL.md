@@ -1,3 +1,8 @@
+---
+description: "Octocode — MCP Skill Reference"
+user-invocable: false
+---
+
 # Octocode — MCP Skill Reference
 
 Server name: `octocode`

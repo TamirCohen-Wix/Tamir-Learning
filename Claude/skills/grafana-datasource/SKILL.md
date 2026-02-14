@@ -1,3 +1,8 @@
+---
+description: "Grafana Datasource — MCP Skill Reference"
+user-invocable: false
+---
+
 # Grafana Datasource — MCP Skill Reference
 
 Server name: `grafana-datasource`

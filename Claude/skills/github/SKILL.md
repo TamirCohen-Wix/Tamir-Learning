@@ -1,3 +1,8 @@
+---
+description: "GitHub — MCP Skill Reference"
+user-invocable: false
+---
+
 # GitHub — MCP Skill Reference
 
 Server name: `github`

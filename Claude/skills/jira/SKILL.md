@@ -1,3 +1,8 @@
+---
+description: "Jira — MCP Skill Reference"
+user-invocable: false
+---
+
 # Jira — MCP Skill Reference
 
 Server name: `jira`

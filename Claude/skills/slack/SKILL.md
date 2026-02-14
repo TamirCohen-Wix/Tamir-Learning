@@ -1,3 +1,8 @@
+---
+description: "Slack — MCP Skill Reference"
+user-invocable: false
+---
+
 # Slack — MCP Skill Reference
 
 Server name: `Slack`

@@ -24,5 +24,7 @@
       "Bash(rm -rf ~)",
       "Bash(rm -rf *)"
     ]
-  }
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "effortLevel": "medium"
 }

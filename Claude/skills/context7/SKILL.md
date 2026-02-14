@@ -1,3 +1,8 @@
+---
+description: "Context7 — MCP Skill Reference"
+user-invocable: false
+---
+
 # Context7 — MCP Skill Reference
 
 Server name: `context-7`
