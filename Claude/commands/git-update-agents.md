@@ -4,10 +4,12 @@ Sync all Claude configuration files to the Tamir-Learning repo for version track
 
 ## What to sync
 
-Copy these directories from `~/.claude/` to `/Users/tamirc/Projects/Tamir-Learning/Claude/`:
+Copy these from `~/.claude/` to `/Users/tamirc/Projects/Tamir-Learning/Claude/`:
 - `agents/` — all agent `.md` files
 - `commands/` — all command `.md` files
 - `skills/` — all skill directories (`<name>/SKILL.md`)
+- `hooks/` — hook scripts (e.g., link validation)
+- `output-styles/` — output style definitions
 - `settings.json` — user-level settings
 - `settings.local.json` — local settings overrides
 - `projects/-Users-tamirc-IdeaProjects-scheduler/memory/MEMORY.md` — copy as `memory/scheduler/MEMORY.md`
@@ -27,10 +29,12 @@ Copy these directories from `~/.claude/` to `/Users/tamirc/Projects/Tamir-Learni
 ## Execution
 
 ```bash
-# Sync agents, commands, skills
+# Sync agents, commands, skills, hooks, output-styles
 rsync -av --delete ~/.claude/agents/ /Users/tamirc/Projects/Tamir-Learning/Claude/agents/
 rsync -av --delete ~/.claude/commands/ /Users/tamirc/Projects/Tamir-Learning/Claude/commands/
 rsync -av --delete ~/.claude/skills/ /Users/tamirc/Projects/Tamir-Learning/Claude/skills/
+rsync -av --delete ~/.claude/hooks/ /Users/tamirc/Projects/Tamir-Learning/Claude/hooks/
+rsync -av --delete ~/.claude/output-styles/ /Users/tamirc/Projects/Tamir-Learning/Claude/output-styles/
 
 # Sync settings
 cp ~/.claude/settings.json /Users/tamirc/Projects/Tamir-Learning/Claude/settings.json
