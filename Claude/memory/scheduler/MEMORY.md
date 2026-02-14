@@ -31,6 +31,7 @@
 | skeptic | any (as needed) | cross-examines two hypotheses, applies 5-point checklist |
 | fix-list | gradual-feature-release (6) | `search-feature-toggles`, `create-feature-release` |
 | documenter | jira (2), slack (1) | `comment-on-issue`, `find-channel-id` |
+| publisher | jira (2), slack (4) | `comment-on-issue`, `slack_post_message`, `slack_find-channel-id` |
 
 ### MCP Tools
 - Sub-agents DO have access to ToolSearch and MCP tools — they can load and use them directly
@@ -102,6 +103,26 @@
 - Setting lives in `~/.claude/settings.json` under `env`
 - Skeptic agent: `~/.claude/agents/skeptic.md` — replaces verifier role within teams
 - `verifier.md` still exists for sequential fallback path
+
+### Hooks
+- **Notification hook** — macOS `osascript` desktop notification when Claude needs input (all notification types)
+- **Link validation hook** — `PostToolUse` on `Write`, runs `~/.claude/hooks/validate-report-links.sh`
+  - Checks `*report.md` files for: malformed Grafana URLs (missing time range/artifact), bad GitHub PR links, invalid Slack archive links, placeholder/truncated URLs
+  - Returns `decision: "block"` with feedback to Claude listing broken links
+  - Claude fixes links before proceeding to publisher
+- Both hooks configured in `~/.claude/settings.json` under `hooks`
+
+### Output Styles
+- `~/.claude/output-styles/investigation-report.md` — Professional formatting for production investigation sessions
+- `~/.claude/output-styles/publisher-format.md` — Platform-specific formatting (Jira wiki markup, Slack mrkdwn, GitHub MD)
+- Activate with `/output-style investigation-report` or `/output-style publisher-format`
+- Output styles affect the main session only, NOT subagents (subagent formatting is in their `.md` files)
+
+### Publisher Agent
+- Step 9 in the pipeline (after documenter), optional — asks user before publishing
+- Publishes to Jira (wiki markup) and/or Slack (mrkdwn)
+- Validates all links before posting
+- Jira: `comment-on-issue`, Slack: `slack_post_message` (via `mcp__Slack__` write server)
 
 ## Codebase Patterns
 

@@ -264,12 +264,12 @@ Create: `{DEBUG_ROOT}/debug-{TASK_SLUG}-{timestamp}/` and store as `OUTPUT_DIR`.
 
 **Create agent subdirectories:**
 ```bash
-mkdir -p {OUTPUT_DIR}/{bug-context,grafana-analyzer,codebase-semantics,production-analyzer,slack-analyzer,hypotheses,verifier,skeptic,fix-list,documenter}
+mkdir -p {OUTPUT_DIR}/{bug-context,grafana-analyzer,codebase-semantics,production-analyzer,slack-analyzer,hypotheses,verifier,skeptic,fix-list,documenter,publisher}
 ```
 
 **Initialize agent invocation counters** (track per-agent re-invocations):
 ```
-AGENT_COUNTERS = {bug-context: 0, grafana-analyzer: 0, codebase-semantics: 0, codebase-semantics-prs: 0, production-analyzer: 0, slack-analyzer: 0, hypotheses: 0, verifier: 0, skeptic: 0, fix-list: 0, documenter: 0}
+AGENT_COUNTERS = {bug-context: 0, grafana-analyzer: 0, codebase-semantics: 0, codebase-semantics-prs: 0, production-analyzer: 0, slack-analyzer: 0, hypotheses: 0, verifier: 0, skeptic: 0, fix-list: 0, documenter: 0, publisher: 0}
 ```
 Increment the relevant counter BEFORE each agent launch. The counter value becomes the `V{N}` suffix in the output filename.
 
@@ -942,6 +942,50 @@ Prompt: [full content of documenter.md agent prompt]
 
 Wait for completion.
 
+**Note:** The `validate-report-links` hook runs automatically after report.md is written. If it detects broken link patterns (malformed Grafana URLs, placeholder URLs, truncated URLs), Claude receives feedback and should fix the links before proceeding. Re-write the report if needed.
+
+---
+
+### STEP 9: Publisher (Optional — Ask User)
+
+**State:** `PUBLISHING`
+
+After the report is generated, offer to publish findings to Jira and/or Slack.
+
+Read the agent prompt from `.claude/agents/publisher.md`.
+
+```
+Ask the user:
+"Investigation complete. Would you like to publish the findings?"
+Options:
+1. Jira comment on [TICKET-ID]
+2. Slack thread (you'll specify the channel)
+3. Both Jira + Slack
+4. Skip — just keep the local report
+```
+
+**If user chooses to publish:**
+
+Increment `AGENT_COUNTERS[publisher]`. Launch **one** Task (model: sonnet):
+```
+Task: subagent_type="general-purpose", model="sonnet"
+Prompt: [full content of publisher.md agent prompt]
+  + REPORT_CONTENT: [full content of report.md]
+  + BUG_CONTEXT_REPORT: [full content]
+  + VERIFIER_REPORT: [full content]
+  + OUTPUT_DIR: {OUTPUT_DIR}
+  + PUBLISH_TO: [user's choice: "jira", "slack", or "both"]
+  + SLACK_CHANNEL: [channel name if slack chosen, from user input]
+  + OUTPUT_FILE: {OUTPUT_DIR}/publisher/publisher-output-V1.md
+  + TRACE_FILE: {OUTPUT_DIR}/publisher/publisher-trace-V1.md
+```
+
+Wait for completion.
+
+**If user skips:** Proceed directly to COMPLETE.
+
+---
+
 **State:** `COMPLETE`
 
 Present the final documentation to the user:
@@ -951,6 +995,7 @@ Report: {OUTPUT_DIR}/report.md
 Hypothesis iterations: {HYPOTHESIS_INDEX}
 Verdict: Confirmed (confidence: X%)
 Root cause: [one sentence from verifier TL;DR]
+Published to: [Jira / Slack / both / local only]
 ```
 
 ---
@@ -959,7 +1004,7 @@ Root cause: [one sentence from verifier TL;DR]
 
 ### Skill File Distribution
 1. **Every agent that uses MCP tools MUST receive the corresponding skill file** in its prompt as `<SERVER>_SKILL_REFERENCE`.
-2. **Mapping:** Grafana agent → `grafana-datasource.md`, Codebase agent → `octocode.md`, Slack agent → `slack.md`, Production agent → `github.md` + `ft-release.md`, Fix-list → `ft-release.md`.
+2. **Mapping:** Grafana agent → `grafana-datasource.md`, Codebase agent → `octocode.md`, Slack agent → `slack.md`, Production agent → `github.md` + `ft-release.md`, Fix-list → `ft-release.md`, Publisher → `jira.md` + `slack.md`.
 3. **Load ALL skill files once at Step 0.5** — don't re-read them for every agent launch.
 
 ### Data Flow Control
